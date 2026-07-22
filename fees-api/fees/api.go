@@ -11,7 +11,7 @@ type BillResource struct {
 	Currency         string     `json:"currency"`
 	Period           string     `json:"period"`
 	Status           string     `json:"status"`
-	TotalMinorAmount string     `json:"total_minor_amount"`
+	TotalMinorAmount string     `json:"totalMinorAmount"`
 	ItemCount        int        `json:"itemCount"`
 	OpenedAt         time.Time  `json:"openedAt"`
 	ClosedAt         *time.Time `json:"closedAt"`

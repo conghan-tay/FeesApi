@@ -50,6 +50,12 @@ func TestBillResourceEncodesClosedAtNull(t *testing.T) {
 	if _, ok := body["closedAt"]; !ok {
 		t.Fatal("expected closedAt key to be present")
 	}
+	if _, ok := body["totalMinorAmount"]; !ok {
+		t.Fatal("expected totalMinorAmount key to be present")
+	}
+	if _, ok := body["total_minor_amount"]; ok {
+		t.Fatal("did not expect legacy total_minor_amount key")
+	}
 	if body["closedAt"] != nil {
 		t.Fatalf("expected closedAt=null, got %#v", body["closedAt"])
 	}
