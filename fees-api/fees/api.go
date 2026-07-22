@@ -1,18 +1,20 @@
-// Service fees owns the Fees API endpoints and the Temporal worker.
 package fees
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 type BillResource struct {
-	BillID           string `json:"billId"`
-	ClientID         string `json:"clientId"`
-	Currency         string `json:"currency"`
-	Period           string `json:"period"`
-	Status           string `json:"status"`
-	TotalMinorAmount string `json:"total_minor_amount"`
-	ItemCount        int    `json:"itemCount"`
-	OpenedAt         string `json:"openedAt"`
-	ClosedAt         string `json:"closedAt,omitempty"`
+	BillID           string     `json:"billId"`
+	ClientID         string     `json:"clientId"`
+	Currency         string     `json:"currency"`
+	Period           string     `json:"period"`
+	Status           string     `json:"status"`
+	TotalMinorAmount string     `json:"total_minor_amount"`
+	ItemCount        int        `json:"itemCount"`
+	OpenedAt         time.Time  `json:"openedAt"`
+	ClosedAt         *time.Time `json:"closedAt"`
 }
 
 type ListBillsResponse struct {
