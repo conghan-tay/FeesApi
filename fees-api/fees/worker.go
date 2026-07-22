@@ -27,6 +27,10 @@ func registerScaffoldWorker(registrar workerRegistrar) {
 	})
 }
 
+func registerActivities(registrar workerRegistrar, activities *Activities) {
+	registrar.RegisterActivityWithOptions(activities, activity.RegisterOptions{})
+}
+
 func ScaffoldWorkflow(ctx workflow.Context) error {
 	activityCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
 		StartToCloseTimeout: 5 * time.Second,
