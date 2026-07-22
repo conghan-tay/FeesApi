@@ -1,6 +1,32 @@
 # PaveBank Fees API
 
-Encore Go scaffold for the PaveBank Fees API take-home.
+Encore Go implementation of the PaveBank Fees API take-home: a billing-period
+fees service backed by Temporal orchestration and a Postgres ledger.
+
+## Architecture Map
+
+The intended production path is deliberately thin at the HTTP layer:
+
+```text
+downstream services
+  -> Encore REST API
+  -> Temporal client
+  -> one BillWorkflow per (clientId, currency, period)
+  -> idempotent Activities
+  -> Postgres ledger
+  -> GET/LIST read directly from the ledger
+```
+
+Temporal owns live lifecycle orchestration. Postgres owns the permanent audit
+record and all queryable invoice facts.
+
+## Build Progress
+
+- Step #1 complete: Encore service scaffold, Temporal client/worker startup, and
+  placeholder `GET /v1/bills`.
+- Step #2 complete: opt-in E2E client/dashboard and README skeleton.
+- Steps #3-#12 upcoming: schema, money helpers, activities, workflow, open/add/
+  close endpoints, ledger reads, auto-close edge cases, and final docs.
 
 ## Local Smoke
 
@@ -32,6 +58,35 @@ The scaffold worker connects to Temporal at `127.0.0.1:7233`, namespace `default
 and polls task queue `fees`. Encore provisions the `feesdb` Postgres database; the
 ledger schema is intentionally deferred to Build Plan #3.
 
+## E2E Dashboard
+
+Build Plan #2 adds a lightweight black-box client in `e2e/`. It is opt-in so the
+normal test suite stays useful while later build steps are still incomplete.
+
+With Temporal and Encore already running:
+
+```bash
+PAVEBANK_E2E=1 PAVEBANK_API_BASE_URL=http://localhost:4000 go test -v ./e2e
+```
+
+The E2E suite first performs a preflight `GET /v1/bills`. If the app is not
+reachable, it fails with startup instructions instead of misleading lifecycle
+assertion errors.
+
+Immediately after Step #2, the preflight should pass and the lifecycle assertions
+should fail cleanly because `POST /v1/bills`, add-line-item, close, and bill detail
+endpoints are not implemented yet. As later build steps land, the same dashboard
+turns green incrementally:
+
+- open bill returns `201` with `Location`
+- add distinct items returns `201`
+- duplicate reference returns `200` without changing the total
+- currency mismatch returns `400`
+- close returns `200` with total and itemized line items
+- add after close returns `409`
+- re-close returns the same `200` invoice body
+- GET and LIST expose the computed ledger total
+
 ## Configuration Notes
 
 Build Plan #1 intentionally uses local Temporal defaults and does not declare
@@ -49,6 +104,8 @@ Run the default suite with verbose output so each test name and result is printe
 ```bash
 encore test -v ./...
 ```
+
+The Step #2 E2E package is skipped unless `PAVEBANK_E2E=1` is set.
 
 Run the optional live Temporal smoke test with Temporal already running:
 
