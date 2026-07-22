@@ -73,6 +73,52 @@ func TestActivityPersistLineItemRejectsClosedBill(t *testing.T) {
 	assertActivityLineItemCount(t, ctx, billID, row.Reference, 0)
 }
 
+func TestActivityPersistLineItemDuplicateOnClosedBillIsIdempotent(t *testing.T) {
+	ctx := context.Background()
+	activities := NewActivities(db)
+	billID := "bill-activity-line-closedup-USD-2099-01"
+	cleanupActivityBill(t, ctx, billID)
+	seedActivityBill(t, ctx, billID, "activity-line-closedup", "USD", "2099-01", "OPEN", nil)
+
+	row := LedgerRow{
+		BillID:      billID,
+		Reference:   "ref-race",
+		AmountMinor: 1500,
+		Currency:    "USD",
+		FeeType:     "wire_transfer",
+		Description: "Outbound USD wire",
+	}
+
+	applied, err := activities.ActivityPersistLineItem(ctx, row)
+	if err != nil {
+		t.Fatalf("ActivityPersistLineItem initial insert returned error: %v", err)
+	}
+	if !applied {
+		t.Fatal("ActivityPersistLineItem initial insert applied=false, want true")
+	}
+
+	closedAt := time.Date(2099, 2, 1, 0, 0, 0, 0, time.UTC)
+	if _, err := db.Exec(ctx, `
+		UPDATE bills
+		   SET status = 'CLOSED',
+		       closed_at = $2
+		 WHERE bill_id = $1`,
+		billID,
+		closedAt,
+	); err != nil {
+		t.Fatalf("close bill after initial insert: %v", err)
+	}
+
+	applied, err = activities.ActivityPersistLineItem(ctx, row)
+	if err != nil {
+		t.Fatalf("ActivityPersistLineItem duplicate after close returned error: %v", err)
+	}
+	if applied {
+		t.Fatal("ActivityPersistLineItem duplicate after close applied=true, want false")
+	}
+	assertActivityLineItemCount(t, ctx, billID, row.Reference, 1)
+}
+
 func TestActivityPersistLineItemRejectsMissingBill(t *testing.T) {
 	ctx := context.Background()
 	activities := NewActivities(db)

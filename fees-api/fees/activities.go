@@ -85,20 +85,25 @@ func (a *Activities) ActivityPersistInvoice(ctx context.Context, billID string) 
 		RETURNING client_id, currency, period, status`,
 		billID,
 	).Scan(&out.ClientID, &out.Currency, &out.Period, &out.Status)
-	if errors.Is(err, sqldb.ErrNoRows) {
-		err = a.db.QueryRow(ctx, `
-			SELECT client_id, currency, period, status
-			  FROM bills
-			 WHERE bill_id = $1`,
-			billID,
-		).Scan(&out.ClientID, &out.Currency, &out.Period, &out.Status)
-		if errors.Is(err, sqldb.ErrNoRows) {
-			return BillView{}, temporalNonRetryable(fmt.Errorf("bill %s does not exist", billID))
-		}
+	if err == nil {
+		return out, nil
 	}
-	if err != nil {
-		return BillView{}, fmt.Errorf("seal bill: %w", err)
+	if !errors.Is(err, sqldb.ErrNoRows) {
+		return BillView{}, fmt.Errorf("seal bill %s: %w", billID, err)
 	}
 
-	return out, nil
+	err = a.db.QueryRow(ctx, `
+		SELECT client_id, currency, period, status
+		  FROM bills
+		 WHERE bill_id = $1`,
+		billID,
+	).Scan(&out.ClientID, &out.Currency, &out.Period, &out.Status)
+	if err == nil {
+		return out, nil
+	}
+	if errors.Is(err, sqldb.ErrNoRows) {
+		return BillView{}, temporalNonRetryable(fmt.Errorf("bill %s does not exist", billID))
+	}
+
+	return BillView{}, fmt.Errorf("read sealed bill %s: %w", billID, err)
 }
