@@ -21,6 +21,10 @@ trip. See §FR2.
 Amount is a *string* so a large stablecoin value can't be mangled by JSON's float
 coercion; the client shifts the decimal based on `currency` (D5).
 
+**JSON naming:** public API request/response fields use camelCase. SQL tables and
+columns may remain snake_case (`amount_minor`, `closed_at`) because they are
+internal ledger storage, not the wire contract.
+
 **Idempotency:** carried by domain keys, not a transport header. `open` is
 idempotent on the bill key; `add-line-item` on `(bill_id, reference)`; `close` on
 bill state. No `Idempotency-Key` header is required.
@@ -56,7 +60,7 @@ then checks `now < resolvePeriodEnd(period)`, then starts the workflow with ID
 
 | Outcome | Status | Notes |
 |---|---|---|
-| Created | `201` + `Location: /v1/bills/{billId}` | bill resource |
+| Created | `201` + `Location` whose path is `/v1/bills/{billId}` | bill resource; `Location` may be relative or absolute |
 | Duplicate open (workflow ID exists) | `409` `type: bill-already-open` | keys off Temporal's `WorkflowExecutionAlreadyStarted`; the workflow ID's point-uniqueness *is* the lock (D1) |
 | Period already elapsed | `422` `type: period-elapsed` | |
 | Malformed period / currency | `400` | validation problem |
@@ -71,7 +75,7 @@ then checks `now < resolvePeriodEnd(period)`, then starts the workflow with ID
   "currency": "USD",
   "period": "2026-07",
   "status": "OPEN",
-  "total_minor_amount" : "0",
+  "totalMinorAmount" : "0",
   "currency" : "USD",
   "itemCount": 0,
   "openedAt": "2026-07-03T14:21:00Z",
@@ -91,7 +95,7 @@ drift from the append-only rows.
 POST /v1/bills/{billId}/line-items
 {
   "reference": "pay-svc-evt-98213",
-  "minor_amount" : "1500",
+  "minorAmount" : "1500",
   "currency" : "USD",
   "feeType": "wire_transfer",
   "description": "Outbound USD wire"
@@ -160,14 +164,14 @@ Returns total **and** items (FR3 requires both), read from the ledger:
 {
   "billId": "bill-acme-USD-2026-07",
   "status": "CLOSED",
-  "total_minor_amount" : "43700",
+  "totalMinorAmount" : "43700",
   "currency" : "USD",
   "itemCount": 12,
   "closedAt": "2026-07-14T09:02:11Z",
   "lineItems": [
     {
       "reference": "pay-svc-evt-98213",
-      "minor_amount" : "1500",
+      "minorAmount" : "1500",
       "currency": "USD",
       "feeType": "wire_transfer",
       "description": "Outbound USD wire",
@@ -180,13 +184,15 @@ Returns total **and** items (FR3 requires both), read from the ledger:
 | Outcome | Status |
 |---|---|
 | Closed now | `200` |
-| Already closed (FR10 idempotent) | `200` — same body, read from ledger |
+| Already closed (FR10 idempotent) | `200` — same sealed invoice facts, read from ledger |
 | No such bill | `404` |
 
-Fresh-close and re-close return identical `200` bodies — the caller can't tell (and
-shouldn't care) who won the seal race. `200` not `201`: close mutates an existing
-resource's state, it doesn't create one. A closed `bills` row *is* the invoice
-(there is no separate invoice resource to create).
+Fresh-close and re-close return the same sealed invoice facts — identity, lifecycle
+state, computed total, item count, close timestamp, and itemized lines. JSON object
+field order and line-item array order are not part of the idempotency guarantee.
+The caller can't tell (and shouldn't care) who won the seal race. `200` not `201`:
+close mutates an existing resource's state, it doesn't create one. A closed
+`bills` row *is* the invoice (there is no separate invoice resource to create).
 
 ---
 
