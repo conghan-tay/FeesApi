@@ -44,6 +44,21 @@ When this app targets non-local environments, introduce secret-backed config for
 
 ## Tests
 
+Run the default suite with verbose output so each test name and result is printed:
+
 ```bash
-encore test ./...
+encore test -v ./...
+```
+
+Run the optional live Temporal smoke test with Temporal already running:
+
+```bash
+PAVEBANK_LIVE_TEMPORAL=1 encore test -v ./...
+```
+
+To capture a simple count of tests run, passed, failed, and skipped:
+
+```bash
+encore test -v ./... 2>&1 | tee /tmp/pavebank-test.log
+awk '/^--- PASS:/{pass++} /^--- FAIL:/{fail++} /^--- SKIP:/{skip++} END{printf "run=%d pass=%d fail=%d skip=%d\n", pass+fail+skip, pass, fail, skip}' /tmp/pavebank-test.log
 ```
