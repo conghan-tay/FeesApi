@@ -103,7 +103,7 @@ func productionTemporalRuntime(cfg temporalConfig) (*temporalRuntime, error) {
 		temporalClient.Close()
 		return nil, fmt.Errorf("create temporal worker on task queue %s: %w", cfg.TaskQueue, err)
 	}
-	registerScaffoldWorker(temporalWorker)
+	registerWorkflows(temporalWorker)
 	registerActivities(temporalWorker, NewActivities(db))
 
 	return &temporalRuntime{
