@@ -1,6 +1,7 @@
 package fees
 
 import (
+	"errors"
 	"testing"
 	"time"
 )
@@ -42,13 +43,36 @@ func TestResolvePeriodEnd(t *testing.T) {
 }
 
 func TestResolvePeriodEndPanicsForMalformedPeriod(t *testing.T) {
-	defer func() {
-		if recover() == nil {
-			t.Fatal("resolvePeriodEnd did not panic for malformed period")
-		}
-	}()
+	tests := []string{
+		"2026-7",
+		"2026-13",
+		"2026-00",
+		"2026-07-01",
+		"26-07",
+		"",
+	}
 
-	resolvePeriodEnd("2026-7")
+	for _, period := range tests {
+		t.Run(period, func(t *testing.T) {
+			defer func() {
+				recovered := recover()
+				if recovered == nil {
+					t.Fatalf("resolvePeriodEnd(%q) did not panic", period)
+				}
+
+				err, ok := recovered.(error)
+				if !ok {
+					t.Fatalf("panic payload = %#v (%T), want error", recovered, recovered)
+				}
+				var parseErr *time.ParseError
+				if !errors.As(err, &parseErr) {
+					t.Fatalf("panic error = %v, want wrapped *time.ParseError", err)
+				}
+			}()
+
+			resolvePeriodEnd(period)
+		})
+	}
 }
 
 func TestBillID(t *testing.T) {
@@ -99,11 +123,25 @@ func TestNewBillStateDefaultsToOpen(t *testing.T) {
 	}
 }
 
+func TestNewBillStateIgnoresCarriedStatusWithoutHasCarry(t *testing.T) {
+	state := newBillState(BillInput{
+		ClientID:      "acme",
+		Currency:      "USD",
+		Period:        "2026-07",
+		CarriedStatus: CLOSED,
+	})
+
+	if state.status != OPEN {
+		t.Fatalf("state status = %v, want OPEN", state.status)
+	}
+}
+
 func TestNewBillStateUsesCarriedStatus(t *testing.T) {
 	state := newBillState(BillInput{
 		ClientID:      "acme",
 		Currency:      "USD",
 		Period:        "2026-07",
+		HasCarry:      true,
 		CarriedStatus: DRAINING,
 	})
 
@@ -145,6 +183,7 @@ func TestBillStateCarryForward(t *testing.T) {
 		ClientID:      "acme",
 		Currency:      "USD",
 		Period:        "2026-07",
+		HasCarry:      true,
 		CarriedStatus: DRAINING,
 	}
 	if got != want {

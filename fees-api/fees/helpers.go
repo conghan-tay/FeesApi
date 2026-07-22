@@ -12,14 +12,14 @@ func billID(clientID, currency, period string) string {
 func resolvePeriodEnd(period string) time.Time {
 	start, err := time.ParseInLocation("2006-01", period, time.UTC)
 	if err != nil {
-		panic(fmt.Sprintf("invalid period identifier %q: %v", period, err))
+		panic(fmt.Errorf("invalid period identifier %q: %w", period, err))
 	}
 	return start.AddDate(0, 1, 0)
 }
 
 func newBillState(in BillInput) *BillState {
 	status := OPEN
-	if in.CarriedStatus != 0 {
+	if in.HasCarry {
 		status = in.CarriedStatus
 	}
 	return &BillState{
@@ -44,6 +44,7 @@ func (s *BillState) carryForward() BillInput {
 		ClientID:      s.clientID,
 		Currency:      s.currency,
 		Period:        s.period,
+		HasCarry:      true,
 		CarriedStatus: s.status,
 	}
 }

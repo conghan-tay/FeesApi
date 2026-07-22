@@ -49,6 +49,7 @@ type BillInput struct {
 	ClientID      string
 	Currency      string
 	Period        string
+	HasCarry      bool
 	CarriedStatus BillStatus
 }
 
