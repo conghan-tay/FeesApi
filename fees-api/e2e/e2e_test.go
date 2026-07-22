@@ -5,8 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
-	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -18,7 +19,9 @@ func TestFeesLifecycleE2E(t *testing.T) {
 		t.Skip("set PAVEBANK_E2E=1 with temporal server start-dev and encore run already running")
 	}
 
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
 	client := NewClient("")
 	preflight(t, ctx, client)
 
@@ -37,7 +40,6 @@ func TestFeesLifecycleE2E(t *testing.T) {
 		})
 		requireNoClientError(t, err)
 		requireStatus(t, resp, http.StatusCreated)
-		requireHeaderPrefix(t, resp.Header.Get("Location"), "/v1/bills/")
 		if resp.Body == nil {
 			t.Fatal("expected bill body")
 		}
@@ -45,11 +47,12 @@ func TestFeesLifecycleE2E(t *testing.T) {
 		if billID != expectedBillID {
 			t.Fatalf("billId = %q, want %q", billID, expectedBillID)
 		}
+		requireLocationForBill(t, resp.Header.Get("Location"), expectedBillID)
 		if resp.Body.Status != "OPEN" {
 			t.Fatalf("status = %q, want OPEN", resp.Body.Status)
 		}
 		if resp.Body.TotalMinorAmount != "0" {
-			t.Fatalf("total_minor_amount = %q, want 0", resp.Body.TotalMinorAmount)
+			t.Fatalf("totalMinorAmount = %q, want 0", resp.Body.TotalMinorAmount)
 		}
 		if resp.Body.ItemCount != 0 {
 			t.Fatalf("itemCount = %d, want 0", resp.Body.ItemCount)
@@ -109,7 +112,7 @@ func TestFeesLifecycleE2E(t *testing.T) {
 			t.Fatal("expected bill body")
 		}
 		if resp.Body.TotalMinorAmount != expectedTotal {
-			t.Fatalf("total_minor_amount = %q, want %s", resp.Body.TotalMinorAmount, expectedTotal)
+			t.Fatalf("totalMinorAmount = %q, want %s", resp.Body.TotalMinorAmount, expectedTotal)
 		}
 		if resp.Body.ItemCount != len(items) {
 			t.Fatalf("itemCount = %d, want %d", resp.Body.ItemCount, len(items))
@@ -157,7 +160,7 @@ func TestFeesLifecycleE2E(t *testing.T) {
 			t.Fatalf("status = %q, want CLOSED", closedBody.Status)
 		}
 		if closedBody.TotalMinorAmount != expectedTotal {
-			t.Fatalf("total_minor_amount = %q, want %s", closedBody.TotalMinorAmount, expectedTotal)
+			t.Fatalf("totalMinorAmount = %q, want %s", closedBody.TotalMinorAmount, expectedTotal)
 		}
 		if len(closedBody.LineItems) != len(items) {
 			t.Fatalf("lineItems length = %d, want %d", len(closedBody.LineItems), len(items))
@@ -179,10 +182,10 @@ func TestFeesLifecycleE2E(t *testing.T) {
 		if resp.Body == nil {
 			t.Fatal("expected closed bill body")
 		}
-		if !reflect.DeepEqual(*resp.Body, closedBody) {
+		if !sameInvoiceFacts(*resp.Body, closedBody) {
 			got, _ := json.MarshalIndent(resp.Body, "", "  ")
 			want, _ := json.MarshalIndent(closedBody, "", "  ")
-			t.Fatalf("re-close body changed\ngot:  %s\nwant: %s", got, want)
+			t.Fatalf("re-close invoice facts changed\ngot:  %s\nwant: %s", got, want)
 		}
 	})
 
@@ -209,12 +212,27 @@ func TestFeesLifecycleE2E(t *testing.T) {
 		if listResp.Body == nil {
 			t.Fatal("expected list body")
 		}
-		for _, bill := range listResp.Body.Bills {
-			if bill.BillID == billID && bill.TotalMinorAmount == expectedTotal {
-				return
+		if !containsBillWithTotal(listResp.Body.Bills, billID, expectedTotal) {
+			t.Fatalf("list response did not include bill %q with total %s: %#v", billID, expectedTotal, listResp.Body.Bills)
+		}
+
+		openResp, err := client.ListBills(ctx, ListBillsParams{
+			ClientID: clientID,
+			Status:   "OPEN",
+			Currency: currency,
+			Period:   period,
+			Limit:    50,
+		})
+		requireNoClientError(t, err)
+		requireStatus(t, openResp, http.StatusOK)
+		if openResp.Body == nil {
+			t.Fatal("expected open-filter list body")
+		}
+		for _, bill := range openResp.Body.Bills {
+			if bill.BillID == billID {
+				t.Fatalf("closed bill %q appeared in status=OPEN list; status filter was not applied", billID)
 			}
 		}
-		t.Fatalf("list response did not include bill %q with total %s: %#v", billID, expectedTotal, listResp.Body.Bills)
 	})
 }
 
@@ -256,9 +274,63 @@ func requireStatus[T any](t *testing.T, resp *Response[T], want int) {
 	t.Fatalf("status = %d, want %d. %s", resp.StatusCode, want, detail)
 }
 
-func requireHeaderPrefix(t *testing.T, got, prefix string) {
+func requireLocationForBill(t *testing.T, got, wantBillID string) {
 	t.Helper()
-	if !strings.HasPrefix(got, prefix) {
-		t.Fatalf("header = %q, want prefix %q", got, prefix)
+	if got == "" {
+		t.Fatalf("Location header missing, want /v1/bills/%s", wantBillID)
 	}
+	u, err := url.Parse(got)
+	if err != nil {
+		t.Fatalf("Location %q not parseable: %v", got, err)
+	}
+	want := "/v1/bills/" + wantBillID
+	if u.Path != want {
+		t.Fatalf("Location path = %q, want %q (raw header = %q)", u.Path, want, got)
+	}
+}
+
+func sameInvoiceFacts(got, want BillResource) bool {
+	return got.BillID == want.BillID &&
+		got.Status == want.Status &&
+		got.Currency == want.Currency &&
+		got.TotalMinorAmount == want.TotalMinorAmount &&
+		got.ItemCount == want.ItemCount &&
+		equalStringPtr(got.ClosedAt, want.ClosedAt) &&
+		sameLineItemsByReference(got.LineItems, want.LineItems)
+}
+
+func equalStringPtr(got, want *string) bool {
+	if got == nil || want == nil {
+		return got == want
+	}
+	return *got == *want
+}
+
+func sameLineItemsByReference(got, want []LineItemResource) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	gotSorted := append([]LineItemResource(nil), got...)
+	wantSorted := append([]LineItemResource(nil), want...)
+	sort.Slice(gotSorted, func(i, j int) bool {
+		return gotSorted[i].Reference < gotSorted[j].Reference
+	})
+	sort.Slice(wantSorted, func(i, j int) bool {
+		return wantSorted[i].Reference < wantSorted[j].Reference
+	})
+	for i := range gotSorted {
+		if gotSorted[i] != wantSorted[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func containsBillWithTotal(bills []BillResource, billID, totalMinorAmount string) bool {
+	for _, bill := range bills {
+		if bill.BillID == billID && bill.TotalMinorAmount == totalMinorAmount {
+			return true
+		}
+	}
+	return false
 }

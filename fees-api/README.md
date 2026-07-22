@@ -84,7 +84,7 @@ turns green incrementally:
 - currency mismatch returns `400`
 - close returns `200` with total and itemized line items
 - add after close returns `409`
-- re-close returns the same `200` invoice body
+- re-close returns the same sealed invoice facts
 - GET and LIST expose the computed ledger total
 
 ## Configuration Notes

@@ -31,7 +31,7 @@ func NewClient(baseURL string) *Client {
 	return &Client{
 		BaseURL: strings.TrimRight(baseURL, "/"),
 		HTTPClient: &http.Client{
-			Timeout: 10 * time.Second,
+			Timeout: 60 * time.Second,
 		},
 	}
 }
@@ -44,7 +44,7 @@ type OpenBillRequest struct {
 
 type LineItemRequest struct {
 	Reference   string `json:"reference"`
-	MinorAmount string `json:"minor_amount"`
+	MinorAmount string `json:"minorAmount"`
 	Currency    string `json:"currency"`
 	FeeType     string `json:"feeType"`
 	Description string `json:"description"`
@@ -60,7 +60,7 @@ type BillResource struct {
 	Currency         string             `json:"currency"`
 	Period           string             `json:"period"`
 	Status           string             `json:"status"`
-	TotalMinorAmount string             `json:"total_minor_amount"`
+	TotalMinorAmount string             `json:"totalMinorAmount"`
 	ItemCount        int                `json:"itemCount"`
 	OpenedAt         string             `json:"openedAt"`
 	ClosedAt         *string            `json:"closedAt"`
@@ -69,7 +69,7 @@ type BillResource struct {
 
 type LineItemResource struct {
 	Reference   string `json:"reference"`
-	MinorAmount string `json:"minor_amount"`
+	MinorAmount string `json:"minorAmount"`
 	Currency    string `json:"currency"`
 	FeeType     string `json:"feeType"`
 	Description string `json:"description"`
