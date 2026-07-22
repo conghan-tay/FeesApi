@@ -14,7 +14,7 @@ Add an opt-in black-box E2E dashboard for the Fees API under `fees-api/e2e`, plu
   - Use unique client IDs per run and a far-future period such as `2099-07` to avoid elapsed-period flakiness.
 - Lock expected wire shapes from the PRD/contracts:
   - Add-line-item success body: `{ "reference": "...", "applied": true|false }`.
-  - Bill body includes computed `total_minor_amount`, `itemCount`, `openedAt`, `closedAt`.
+  - Bill body includes computed `totalMinorAmount`, `itemCount`, `openedAt`, `closedAt`.
   - Close/get-with-items body includes `lineItems`.
   - Error bodies are parsed as RFC 9457 problem JSON, but this step primarily asserts HTTP status until endpoint-specific error taxonomy lands later.
 - Update `fees-api/README.md`.
@@ -31,7 +31,7 @@ Add an opt-in black-box E2E dashboard for the Fees API under `fees-api/e2e`, plu
 - Add mismatched-currency item: expect `400`.
 - Close bill: expect `200`, correct total, itemized list present.
 - Add after close: expect `409`.
-- Re-close: expect `200` with the same invoice body.
+- Re-close: expect `200` with the same sealed invoice facts.
 - Get and list: bill appears with computed total under `clientId/status/currency/period` filters.
 
 ## Test Plan
