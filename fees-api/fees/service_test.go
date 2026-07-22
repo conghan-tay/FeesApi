@@ -3,6 +3,7 @@ package fees
 import (
 	"context"
 	"errors"
+	"reflect"
 	"testing"
 	"time"
 
@@ -41,6 +42,7 @@ type fakeTemporalWorker struct {
 
 	workflowNames []string
 	activityNames []string
+	activities    []interface{}
 
 	stopStarted chan struct{}
 	stopRelease chan struct{}
@@ -50,8 +52,9 @@ func (w *fakeTemporalWorker) RegisterWorkflowWithOptions(_ interface{}, options 
 	w.workflowNames = append(w.workflowNames, options.Name)
 }
 
-func (w *fakeTemporalWorker) RegisterActivityWithOptions(_ interface{}, options activity.RegisterOptions) {
+func (w *fakeTemporalWorker) RegisterActivityWithOptions(a interface{}, options activity.RegisterOptions) {
 	w.activityNames = append(w.activityNames, options.Name)
+	w.activities = append(w.activities, a)
 }
 
 func (w *fakeTemporalWorker) Start() error {
@@ -160,8 +163,20 @@ func TestInitServiceSuccessRegistersAndStartsWorker(t *testing.T) {
 	if len(fakeWorker.workflowNames) != 1 || fakeWorker.workflowNames[0] != scaffoldWorkflowName {
 		t.Fatalf("registered workflow names = %#v, want [%q]", fakeWorker.workflowNames, scaffoldWorkflowName)
 	}
-	if len(fakeWorker.activityNames) != 1 || fakeWorker.activityNames[0] != scaffoldActivityName {
-		t.Fatalf("registered activity names = %#v, want [%q]", fakeWorker.activityNames, scaffoldActivityName)
+	if len(fakeWorker.activityNames) != 2 {
+		t.Fatalf("registered activity names = %#v, want scaffold activity and Activities struct", fakeWorker.activityNames)
+	}
+	if fakeWorker.activityNames[0] != scaffoldActivityName {
+		t.Fatalf("first activity name = %q, want %q", fakeWorker.activityNames[0], scaffoldActivityName)
+	}
+	if fakeWorker.activityNames[1] != "" {
+		t.Fatalf("second activity registration name = %q, want empty name for unprefixed method activities", fakeWorker.activityNames[1])
+	}
+	if len(fakeWorker.activities) != 2 {
+		t.Fatalf("registered activity values = %d, want 2", len(fakeWorker.activities))
+	}
+	if got := reflect.TypeOf(fakeWorker.activities[1]).String(); got != "*fees.Activities" {
+		t.Fatalf("second registered activity type = %q, want *fees.Activities", got)
 	}
 	if svc.temporalConfig != defaultTemporalConfig() {
 		t.Fatalf("service config = %#v, want %#v", svc.temporalConfig, defaultTemporalConfig())

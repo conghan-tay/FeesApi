@@ -1,6 +1,7 @@
 package fees
 
 import (
+	"reflect"
 	"testing"
 
 	"go.temporal.io/sdk/activity"
@@ -10,6 +11,7 @@ import (
 type recordingRegistrar struct {
 	workflowNames []string
 	activityNames []string
+	activities    []interface{}
 }
 
 func (r *recordingRegistrar) RegisterWorkflowWithOptions(w interface{}, options workflow.RegisterOptions) {
@@ -18,6 +20,7 @@ func (r *recordingRegistrar) RegisterWorkflowWithOptions(w interface{}, options 
 
 func (r *recordingRegistrar) RegisterActivityWithOptions(a interface{}, options activity.RegisterOptions) {
 	r.activityNames = append(r.activityNames, options.Name)
+	r.activities = append(r.activities, a)
 }
 
 func TestRegisterScaffoldWorker(t *testing.T) {
@@ -36,5 +39,28 @@ func TestRegisterScaffoldWorker(t *testing.T) {
 	}
 	if registrar.activityNames[0] != scaffoldActivityName {
 		t.Fatalf("activity name = %q, want %q", registrar.activityNames[0], scaffoldActivityName)
+	}
+}
+
+func TestRegisterActivities(t *testing.T) {
+	registrar := &recordingRegistrar{}
+	activities := NewActivities(db)
+
+	registerActivities(registrar, activities)
+
+	if len(registrar.activityNames) != 1 {
+		t.Fatalf("registered %d activity batches, want 1", len(registrar.activityNames))
+	}
+	if registrar.activityNames[0] != "" {
+		t.Fatalf("activity registration name = %q, want empty name for unprefixed method activities", registrar.activityNames[0])
+	}
+	if len(registrar.activities) != 1 {
+		t.Fatalf("registered %d activity values, want 1", len(registrar.activities))
+	}
+	if registrar.activities[0] != activities {
+		t.Fatal("registered activity value is not the Activities instance passed to registerActivities")
+	}
+	if got := reflect.TypeOf(registrar.activities[0]).String(); got != "*fees.Activities" {
+		t.Fatalf("registered activity type = %q, want *fees.Activities", got)
 	}
 }
