@@ -3,8 +3,11 @@ package fees
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"strings"
 	"testing"
+
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 func TestLedgerSchemaTablesAndColumns(t *testing.T) {
@@ -95,6 +98,50 @@ func TestCurrenciesSeedRows(t *testing.T) {
 			t.Fatalf("currency %s exponent = %d, want %d; all rows: %#v", code, got[code], exponent, got)
 		}
 	}
+}
+
+func TestLedgerConstraintsRejectBadInserts(t *testing.T) {
+	ctx := context.Background()
+	// Bad status is rejected by the CHECK.
+	_, err := db.Exec(ctx, `
+		INSERT INTO bills (bill_id, client_id, currency, period, status)
+		VALUES ('bill-schema-guard-bad-status-USD-2099-01', 'schema-guard', 'USD', '2099-01', 'DRAINING')`)
+	assertPgErrorCode(t, err, "23514")
+
+	// Orphan line_item is rejected by the FK.
+	_, err = db.Exec(ctx, `
+		INSERT INTO line_items (bill_id, reference, amount_minor, currency, fee_type)
+		VALUES ('bill-schema-guard-missing-USD-2099-01', 'schema-guard-orphan', 100, 'USD', 'wire_transfer')`)
+	assertPgErrorCode(t, err, "23503")
+
+	// Setup one bill so the two uniqueness checks have a valid target.
+	if _, err := db.Exec(ctx, `
+		INSERT INTO bills (bill_id, client_id, currency, period)
+		VALUES ('bill-schema-guard-USD-2099-02', 'schema-guard', 'USD', '2099-02')`); err != nil {
+		t.Fatalf("seed bill for uniqueness checks: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = db.Exec(ctx, `DELETE FROM line_items WHERE bill_id = 'bill-schema-guard-USD-2099-02'`)
+		_, _ = db.Exec(ctx, `DELETE FROM bills WHERE bill_id = 'bill-schema-guard-USD-2099-02'`)
+	})
+
+	// Duplicate (client_id, currency, period).
+	_, err = db.Exec(ctx, `
+		INSERT INTO bills (bill_id, client_id, currency, period)
+		VALUES ('bill-schema-guard-USD-2099-02-dup', 'schema-guard', 'USD', '2099-02')`)
+	assertPgErrorCode(t, err, "23505")
+
+	// Duplicate (bill_id, reference).
+	if _, err := db.Exec(ctx, `
+		INSERT INTO line_items (bill_id, reference, amount_minor, currency, fee_type)
+		VALUES ('bill-schema-guard-USD-2099-02', 'schema-guard-ref-dup', 100, 'USD', 'wire_transfer')`); err != nil {
+		t.Fatalf("seed line item for uniqueness check: %v", err)
+	}
+
+	_, err = db.Exec(ctx, `
+		INSERT INTO line_items (bill_id, reference, amount_minor, currency, fee_type)
+		VALUES ('bill-schema-guard-USD-2099-02', 'schema-guard-ref-dup', 200, 'USD', 'wire_transfer')`)
+	assertPgErrorCode(t, err, "23505")
 }
 
 type columnInfo struct {
@@ -270,5 +317,21 @@ func assertIndexExists(t *testing.T, ctx context.Context, name string) {
 	}
 	if !exists {
 		t.Fatalf("expected index %s to exist", name)
+	}
+}
+
+func assertPgErrorCode(t *testing.T, err error, code string) {
+	t.Helper()
+
+	if err == nil {
+		t.Fatalf("expected PostgreSQL error code %s, got nil", code)
+	}
+
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) {
+		t.Fatalf("expected PostgreSQL error code %s, got non-PostgreSQL error %T: %v", code, err, err)
+	}
+	if pgErr.Code != code {
+		t.Fatalf("PostgreSQL error code = %s (%s), want %s; error: %v", pgErr.Code, pgErr.Message, code, err)
 	}
 }
