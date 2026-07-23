@@ -23,22 +23,19 @@ func (r *recordingRegistrar) RegisterActivityWithOptions(a interface{}, options 
 	r.activities = append(r.activities, a)
 }
 
-func TestRegisterScaffoldWorker(t *testing.T) {
+func TestRegisterWorkflows(t *testing.T) {
 	registrar := &recordingRegistrar{}
 
-	registerScaffoldWorker(registrar)
+	registerWorkflows(registrar)
 
 	if len(registrar.workflowNames) != 1 {
 		t.Fatalf("registered %d workflows, want 1", len(registrar.workflowNames))
 	}
-	if registrar.workflowNames[0] != scaffoldWorkflowName {
-		t.Fatalf("workflow name = %q, want %q", registrar.workflowNames[0], scaffoldWorkflowName)
+	if registrar.workflowNames[0] != BillWorkflowName {
+		t.Fatalf("workflow name = %q, want %q", registrar.workflowNames[0], BillWorkflowName)
 	}
-	if len(registrar.activityNames) != 1 {
-		t.Fatalf("registered %d activities, want 1", len(registrar.activityNames))
-	}
-	if registrar.activityNames[0] != scaffoldActivityName {
-		t.Fatalf("activity name = %q, want %q", registrar.activityNames[0], scaffoldActivityName)
+	if len(registrar.activityNames) != 0 {
+		t.Fatalf("registered %d activities, want 0", len(registrar.activityNames))
 	}
 }
 

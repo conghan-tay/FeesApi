@@ -160,23 +160,20 @@ func TestInitServiceSuccessRegistersAndStartsWorker(t *testing.T) {
 	if fakeWorker.startCount != 1 {
 		t.Fatalf("worker start count = %d, want 1", fakeWorker.startCount)
 	}
-	if len(fakeWorker.workflowNames) != 1 || fakeWorker.workflowNames[0] != scaffoldWorkflowName {
-		t.Fatalf("registered workflow names = %#v, want [%q]", fakeWorker.workflowNames, scaffoldWorkflowName)
+	if len(fakeWorker.workflowNames) != 1 || fakeWorker.workflowNames[0] != BillWorkflowName {
+		t.Fatalf("registered workflow names = %#v, want [%q]", fakeWorker.workflowNames, BillWorkflowName)
 	}
-	if len(fakeWorker.activityNames) != 2 {
-		t.Fatalf("registered activity names = %#v, want scaffold activity and Activities struct", fakeWorker.activityNames)
+	if len(fakeWorker.activityNames) != 1 {
+		t.Fatalf("registered activity names = %#v, want Activities struct", fakeWorker.activityNames)
 	}
-	if fakeWorker.activityNames[0] != scaffoldActivityName {
-		t.Fatalf("first activity name = %q, want %q", fakeWorker.activityNames[0], scaffoldActivityName)
+	if fakeWorker.activityNames[0] != "" {
+		t.Fatalf("activity registration name = %q, want empty name for unprefixed method activities", fakeWorker.activityNames[0])
 	}
-	if fakeWorker.activityNames[1] != "" {
-		t.Fatalf("second activity registration name = %q, want empty name for unprefixed method activities", fakeWorker.activityNames[1])
+	if len(fakeWorker.activities) != 1 {
+		t.Fatalf("registered activity values = %d, want 1", len(fakeWorker.activities))
 	}
-	if len(fakeWorker.activities) != 2 {
-		t.Fatalf("registered activity values = %d, want 2", len(fakeWorker.activities))
-	}
-	if got := reflect.TypeOf(fakeWorker.activities[1]).String(); got != "*fees.Activities" {
-		t.Fatalf("second registered activity type = %q, want *fees.Activities", got)
+	if got := reflect.TypeOf(fakeWorker.activities[0]).String(); got != "*fees.Activities" {
+		t.Fatalf("registered activity type = %q, want *fees.Activities", got)
 	}
 	if svc.temporalConfig != defaultTemporalConfig() {
 		t.Fatalf("service config = %#v, want %#v", svc.temporalConfig, defaultTemporalConfig())

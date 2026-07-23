@@ -25,7 +25,7 @@ func (s BillStatus) String() string {
 }
 
 func (s BillStatus) acceptsAccruals() bool {
-	return s == OPEN || s == DRAINING
+	return s == OPEN
 }
 
 type LineItem struct {
