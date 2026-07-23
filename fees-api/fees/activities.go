@@ -10,6 +10,7 @@ import (
 )
 
 const (
+	ActivityPersistBill     = "ActivityPersistBill"
 	ActivityPersistLineItem = "ActivityPersistLineItem"
 	ActivityPersistInvoice  = "ActivityPersistInvoice"
 )
@@ -24,6 +25,22 @@ func NewActivities(db *sqldb.Database) *Activities {
 
 func temporalNonRetryable(err error) error {
 	return temporal.NewNonRetryableApplicationError(err.Error(), "BillNotOpen", err)
+}
+
+func (a *Activities) ActivityPersistBill(ctx context.Context, input BillInput) error {
+	_, err := a.db.Exec(ctx, `
+		INSERT INTO bills (bill_id, client_id, currency, period, status)
+		VALUES ($1, $2, $3, $4, 'OPEN')
+		ON CONFLICT (bill_id) DO NOTHING`,
+		billID(input.ClientID, input.Currency, input.Period),
+		input.ClientID,
+		input.Currency,
+		input.Period,
+	)
+	if err != nil {
+		return fmt.Errorf("persist bill: %w", err)
+	}
+	return nil
 }
 
 func (a *Activities) ActivityPersistLineItem(ctx context.Context, row LedgerRow) (bool, error) {

@@ -34,6 +34,20 @@ func (c *fakeTemporalClient) Close() {
 	c.closeCount++
 }
 
+func (c *fakeTemporalClient) NewWithStartWorkflowOperation(client.StartWorkflowOptions, interface{}, ...interface{}) client.WithStartWorkflowOperation {
+	return fakeWithStartWorkflowOperation{}
+}
+
+func (c *fakeTemporalClient) UpdateWithStartWorkflow(context.Context, client.UpdateWithStartWorkflowOptions) (client.WorkflowUpdateHandle, error) {
+	return nil, nil
+}
+
+type fakeWithStartWorkflowOperation struct{}
+
+func (fakeWithStartWorkflowOperation) Get(context.Context) (client.WorkflowRun, error) {
+	return nil, nil
+}
+
 type fakeTemporalWorker struct {
 	startErr error
 

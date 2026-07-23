@@ -22,6 +22,8 @@ type temporalConfig struct {
 
 type temporalClient interface {
 	Close()
+	NewWithStartWorkflowOperation(options client.StartWorkflowOptions, workflow interface{}, args ...interface{}) client.WithStartWorkflowOperation
+	UpdateWithStartWorkflow(ctx context.Context, options client.UpdateWithStartWorkflowOptions) (client.WorkflowUpdateHandle, error)
 }
 
 type temporalWorker interface {

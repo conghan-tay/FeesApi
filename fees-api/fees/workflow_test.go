@@ -19,12 +19,15 @@ func TestBillWorkflowQueryStartsOpen(t *testing.T) {
 	env := newBillWorkflowTestEnv()
 	in := testBillInput()
 
+	expectPersistBill(env, in)
 	env.OnActivity(ActivityPersistInvoice, mock.Anything, billID(in.ClientID, in.Currency, in.Period)).
 		Return(testClosedBillView(in), nil).
 		Once()
 
 	queried := false
 	env.RegisterDelayedCallback(func() {
+		defer env.SignalWorkflow(SignalCloseBill, CloseSignal{Reason: "test-close"})
+
 		value, err := env.QueryWorkflow(QueryGetBill)
 		if err != nil {
 			t.Errorf("QueryWorkflow returned error: %v", err)
@@ -48,13 +51,121 @@ func TestBillWorkflowQueryStartsOpen(t *testing.T) {
 			return
 		}
 		queried = true
-		env.SignalWorkflow(SignalCloseBill, CloseSignal{Reason: "test-close"})
-	}, time.Millisecond)
+	}, time.Second)
 
 	env.ExecuteWorkflow(BillWorkflow, in)
 	assertBillWorkflowCompleted(t, env)
 	if !queried {
 		t.Fatal("QueryGetBill callback did not run")
+	}
+	env.AssertExpectations(t)
+}
+
+func TestBillWorkflowAwaitOpenCompletesAfterPersistBill(t *testing.T) {
+	env := newBillWorkflowTestEnv()
+	in := testBillInput()
+	persistCompleted := false
+
+	env.OnActivity(ActivityPersistBill, mock.Anything, in).
+		After(time.Hour).
+		Run(func(mock.Arguments) {
+			persistCompleted = true
+		}).
+		Return(nil).
+		Once()
+	env.OnActivity(ActivityPersistInvoice, mock.Anything, billID(in.ClientID, in.Currency, in.Period)).
+		Return(testClosedBillView(in), nil).
+		Once()
+
+	var updateCompleted bool
+	env.RegisterDelayedCallback(func() {
+		env.UpdateWorkflow(UpdateAwaitOpen, "update-await-open", &testsuite.TestUpdateCallback{
+			OnReject: func(err error) {
+				t.Errorf("await-open update rejected: %v", err)
+			},
+			OnComplete: func(result interface{}, err error) {
+				if err != nil {
+					t.Errorf("await-open update completed with error: %v", err)
+					return
+				}
+				if !persistCompleted {
+					t.Error("await-open completed before ActivityPersistBill")
+					return
+				}
+				got := result.(BillView)
+				want := BillView{
+					ClientID: in.ClientID,
+					Currency: in.Currency,
+					Period:   in.Period,
+					Status:   "OPEN",
+				}
+				if got != want {
+					t.Errorf("await-open result = %#v, want %#v", got, want)
+					return
+				}
+				updateCompleted = true
+			},
+		})
+	}, 0)
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow(SignalCloseBill, CloseSignal{Reason: "test-close"})
+	}, 2*time.Hour)
+
+	env.ExecuteWorkflow(BillWorkflow, in)
+	assertBillWorkflowCompleted(t, env)
+	if !updateCompleted {
+		t.Fatal("await-open update did not complete")
+	}
+	env.AssertExpectations(t)
+}
+
+func TestBillWorkflowBuffersAddLineItemDuringStartup(t *testing.T) {
+	env := newBillWorkflowTestEnv()
+	in := testBillInput()
+	item := testLineItem("ref-startup-buffered", "USD")
+	row := testLedgerRow(in, item)
+
+	persistCall := env.OnActivity(ActivityPersistBill, mock.Anything, in).
+		After(time.Hour).
+		Return(nil).
+		Once()
+	env.OnActivity(ActivityPersistLineItem, mock.Anything, row).
+		Return(true, nil).
+		NotBefore(persistCall).
+		Once()
+	env.OnActivity(ActivityPersistInvoice, mock.Anything, row.BillID).
+		Return(testClosedBillView(in), nil).
+		Once()
+
+	var updateCompleted bool
+	env.RegisterDelayedCallback(func() {
+		env.UpdateWorkflow(UpdateAddLineItem, "update-startup-buffered", &testsuite.TestUpdateCallback{
+			OnReject: func(err error) {
+				t.Errorf("startup add-line-item update rejected: %v", err)
+			},
+			OnComplete: func(result interface{}, err error) {
+				if err != nil {
+					t.Errorf("startup add-line-item update completed with error: %v", err)
+					return
+				}
+				got := result.(LineItemResult)
+				want := LineItemResult{Reference: item.Reference, Applied: true}
+				if got != want {
+					t.Errorf("LineItemResult = %#v, want %#v", got, want)
+					return
+				}
+				updateCompleted = true
+			},
+		}, item)
+	}, 0)
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow(SignalCloseBill, CloseSignal{Reason: "test-close"})
+	}, 2*time.Hour)
+
+	env.ExecuteWorkflow(BillWorkflow, in)
+	assertBillWorkflowCompleted(t, env)
+	if !updateCompleted {
+		t.Fatal("startup add-line-item update did not complete")
 	}
 	env.AssertExpectations(t)
 }
@@ -65,6 +176,7 @@ func TestBillWorkflowAddLineItemReturnsApplied(t *testing.T) {
 	item := testLineItem("ref-fresh", "USD")
 	row := testLedgerRow(in, item)
 
+	expectPersistBill(env, in)
 	env.OnActivity(ActivityPersistLineItem, mock.Anything, row).
 		Return(true, nil).
 		Once()
@@ -92,7 +204,7 @@ func TestBillWorkflowAddLineItemReturnsApplied(t *testing.T) {
 				updateCompleted = true
 			},
 		}, item)
-	}, 0)
+	}, time.Millisecond)
 	env.RegisterDelayedCallback(func() {
 		env.SignalWorkflow(SignalCloseBill, CloseSignal{Reason: "test-close"})
 	}, time.Minute)
@@ -111,6 +223,7 @@ func TestBillWorkflowAddLineItemReturnsDuplicateNoop(t *testing.T) {
 	item := testLineItem("ref-duplicate", "USD")
 	row := testLedgerRow(in, item)
 
+	expectPersistBill(env, in)
 	env.OnActivity(ActivityPersistLineItem, mock.Anything, row).
 		Return(false, nil).
 		Once()
@@ -138,7 +251,7 @@ func TestBillWorkflowAddLineItemReturnsDuplicateNoop(t *testing.T) {
 				updateCompleted = true
 			},
 		}, item)
-	}, 0)
+	}, time.Millisecond)
 	env.RegisterDelayedCallback(func() {
 		env.SignalWorkflow(SignalCloseBill, CloseSignal{Reason: "test-close"})
 	}, time.Minute)
@@ -155,6 +268,7 @@ func TestBillWorkflowRejectsCurrencyMismatchInValidator(t *testing.T) {
 	env := newBillWorkflowTestEnv()
 	in := testBillInput()
 
+	expectPersistBill(env, in)
 	env.OnActivity(ActivityPersistInvoice, mock.Anything, billID(in.ClientID, in.Currency, in.Period)).
 		Return(testClosedBillView(in), nil).
 		Once()
@@ -171,7 +285,7 @@ func TestBillWorkflowRejectsCurrencyMismatchInValidator(t *testing.T) {
 			},
 		}, testLineItem("ref-mismatch", "GEL"))
 		env.SignalWorkflow(SignalCloseBill, CloseSignal{Reason: "test-close"})
-	}, 0)
+	}, time.Millisecond)
 
 	env.ExecuteWorkflow(BillWorkflow, in)
 	assertBillWorkflowCompleted(t, env)
@@ -186,6 +300,7 @@ func TestBillWorkflowRejectsAddDuringClosing(t *testing.T) {
 	env := newBillWorkflowTestEnv()
 	in := testBillInput()
 
+	expectPersistBill(env, in)
 	env.OnActivity(ActivityPersistInvoice, mock.Anything, billID(in.ClientID, in.Currency, in.Period)).
 		After(time.Hour).
 		Return(testClosedBillView(in), nil).
@@ -194,7 +309,7 @@ func TestBillWorkflowRejectsAddDuringClosing(t *testing.T) {
 	var rejected bool
 	env.RegisterDelayedCallback(func() {
 		env.SignalWorkflow(SignalCloseBill, CloseSignal{Reason: "test-close"})
-	}, 0)
+	}, time.Millisecond)
 	env.RegisterDelayedCallback(func() {
 		env.UpdateWorkflow(UpdateAddLineItem, "update-after-close", &testsuite.TestUpdateCallback{
 			OnReject: func(err error) {
@@ -224,6 +339,7 @@ func TestBillWorkflowRejectsAddDuringDraining(t *testing.T) {
 	rejectedItem := testLineItem("ref-during-draining", "USD")
 	rejectedRow := testLedgerRow(in, rejectedItem)
 
+	expectPersistBill(env, in)
 	lineItemCall := env.OnActivity(ActivityPersistLineItem, mock.Anything, inFlightRow).
 		After(time.Hour).
 		Return(true, nil).
@@ -245,7 +361,7 @@ func TestBillWorkflowRejectsAddDuringDraining(t *testing.T) {
 				}
 			},
 		}, inFlightItem)
-	}, 0)
+	}, time.Millisecond)
 	env.RegisterDelayedCallback(func() {
 		env.SignalWorkflow(SignalCloseBill, CloseSignal{Reason: "test-close"})
 	}, time.Minute)
@@ -275,13 +391,14 @@ func TestBillWorkflowExplicitCloseSealsBill(t *testing.T) {
 	env := newBillWorkflowTestEnv()
 	in := testBillInput()
 
+	expectPersistBill(env, in)
 	env.OnActivity(ActivityPersistInvoice, mock.Anything, billID(in.ClientID, in.Currency, in.Period)).
 		Return(testClosedBillView(in), nil).
 		Once()
 
 	env.RegisterDelayedCallback(func() {
 		env.SignalWorkflow(SignalCloseBill, CloseSignal{Reason: "explicit-close"})
-	}, 0)
+	}, time.Millisecond)
 
 	env.ExecuteWorkflow(BillWorkflow, in)
 	assertBillWorkflowCompleted(t, env)
@@ -293,6 +410,7 @@ func TestBillWorkflowAutoCloseTimerSealsBill(t *testing.T) {
 	in := testBillInput()
 	env.SetStartTime(time.Date(2099, 1, 31, 23, 59, 0, 0, time.UTC))
 
+	expectPersistBill(env, in)
 	env.OnActivity(ActivityPersistInvoice, mock.Anything, billID(in.ClientID, in.Currency, in.Period)).
 		Return(testClosedBillView(in), nil).
 		Once()
@@ -308,6 +426,7 @@ func TestBillWorkflowDrainsInFlightUpdateBeforeSeal(t *testing.T) {
 	item := testLineItem("ref-drain", "USD")
 	row := testLedgerRow(in, item)
 
+	expectPersistBill(env, in)
 	lineItemCall := env.OnActivity(ActivityPersistLineItem, mock.Anything, row).
 		After(time.Hour).
 		Return(true, nil).
@@ -331,7 +450,7 @@ func TestBillWorkflowDrainsInFlightUpdateBeforeSeal(t *testing.T) {
 				updateCompleted = true
 			},
 		}, item)
-	}, 0)
+	}, time.Millisecond)
 	env.RegisterDelayedCallback(func() {
 		env.SignalWorkflow(SignalCloseBill, CloseSignal{Reason: "close-during-update"})
 	}, time.Minute)
@@ -349,6 +468,7 @@ func TestBillWorkflowContinueAsNewCarriesStatus(t *testing.T) {
 	in := testBillInput()
 	env.SetContinueAsNewSuggested(true)
 
+	expectPersistBill(env, in)
 	env.ExecuteWorkflow(BillWorkflow, in)
 
 	assertContinueAsNewCarriesStatus(t, env, in)
@@ -390,6 +510,7 @@ func TestBillWorkflowCANWakesFromUpdateHandler(t *testing.T) {
 	item := testLineItem("ref-can", "USD")
 	row := testLedgerRow(in, item)
 
+	expectPersistBill(env, in)
 	env.OnActivity(ActivityPersistLineItem, mock.Anything, row).
 		Run(func(mock.Arguments) {
 			env.SetContinueAsNewSuggested(true)
@@ -417,7 +538,7 @@ func TestBillWorkflowCANWakesFromUpdateHandler(t *testing.T) {
 				updateCompleted = true
 			},
 		}, item)
-	}, 0)
+	}, time.Millisecond)
 
 	env.ExecuteWorkflow(BillWorkflow, in)
 
@@ -431,9 +552,20 @@ func TestBillWorkflowCANWakesFromUpdateHandler(t *testing.T) {
 func newBillWorkflowTestEnv() *testsuite.TestWorkflowEnvironment {
 	var suite testsuite.WorkflowTestSuite
 	env := suite.NewTestWorkflowEnvironment()
+	env.RegisterActivityWithOptions(mockPersistBillActivity, activity.RegisterOptions{Name: ActivityPersistBill})
 	env.RegisterActivityWithOptions(mockPersistLineItemActivity, activity.RegisterOptions{Name: ActivityPersistLineItem})
 	env.RegisterActivityWithOptions(mockPersistInvoiceActivity, activity.RegisterOptions{Name: ActivityPersistInvoice})
 	return env
+}
+
+func expectPersistBill(env *testsuite.TestWorkflowEnvironment, in BillInput) {
+	env.OnActivity(ActivityPersistBill, mock.Anything, in).
+		Return(nil).
+		Once()
+}
+
+func mockPersistBillActivity(context.Context, BillInput) error {
+	panic("mockPersistBillActivity should be mocked in workflow tests")
 }
 
 func mockPersistLineItemActivity(context.Context, LedgerRow) (bool, error) {

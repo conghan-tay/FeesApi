@@ -45,6 +45,28 @@ func TestActivityPersistLineItemFreshInsertAndDuplicate(t *testing.T) {
 	assertActivityLineItemCount(t, ctx, billID, row.Reference, 1)
 }
 
+func TestActivityPersistBillFreshInsertAndDuplicate(t *testing.T) {
+	ctx := context.Background()
+	activities := NewActivities(db)
+	input := BillInput{
+		ClientID: "activity-open",
+		Currency: "USD",
+		Period:   "2099-01",
+	}
+	billID := billID(input.ClientID, input.Currency, input.Period)
+	cleanupActivityBill(t, ctx, billID)
+
+	if err := activities.ActivityPersistBill(ctx, input); err != nil {
+		t.Fatalf("ActivityPersistBill fresh insert returned error: %v", err)
+	}
+	assertActivityBillRow(t, ctx, billID, input.ClientID, input.Currency, input.Period, "OPEN", 1)
+
+	if err := activities.ActivityPersistBill(ctx, input); err != nil {
+		t.Fatalf("ActivityPersistBill duplicate returned error: %v", err)
+	}
+	assertActivityBillRow(t, ctx, billID, input.ClientID, input.Currency, input.Period, "OPEN", 1)
+}
+
 func TestActivityPersistLineItemRejectsClosedBill(t *testing.T) {
 	ctx := context.Background()
 	activities := NewActivities(db)
@@ -309,6 +331,31 @@ func assertActivityLineItemCount(t *testing.T, ctx context.Context, billID, refe
 	}
 	if got != want {
 		t.Fatalf("line item count for %s/%s = %d, want %d", billID, reference, got, want)
+	}
+}
+
+func assertActivityBillRow(t *testing.T, ctx context.Context, billID, clientID, currency, period, status string, wantCount int) {
+	t.Helper()
+
+	var gotCount int
+	if err := db.QueryRow(ctx, `
+		SELECT COUNT(*)
+		  FROM bills
+		 WHERE bill_id = $1
+		   AND client_id = $2
+		   AND currency = $3
+		   AND period = $4
+		   AND status = $5`,
+		billID,
+		clientID,
+		currency,
+		period,
+		status,
+	).Scan(&gotCount); err != nil {
+		t.Fatalf("count bill row %s: %v", billID, err)
+	}
+	if gotCount != wantCount {
+		t.Fatalf("bill row count for %s = %d, want %d", billID, gotCount, wantCount)
 	}
 }
 
