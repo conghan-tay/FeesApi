@@ -38,6 +38,10 @@ func (c *fakeTemporalClient) NewWithStartWorkflowOperation(client.StartWorkflowO
 	return fakeWithStartWorkflowOperation{}
 }
 
+func (c *fakeTemporalClient) UpdateWorkflow(context.Context, client.UpdateWorkflowOptions) (client.WorkflowUpdateHandle, error) {
+	return nil, nil
+}
+
 func (c *fakeTemporalClient) UpdateWithStartWorkflow(context.Context, client.UpdateWithStartWorkflowOptions) (client.WorkflowUpdateHandle, error) {
 	return nil, nil
 }
