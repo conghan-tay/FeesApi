@@ -19,6 +19,21 @@ const (
 func BillWorkflow(ctx workflow.Context, input BillInput) error {
 	log := workflow.GetLogger(ctx)
 	state := newBillState(input)
+	billPersisted := false
+
+	if err := workflow.SetUpdateHandler(ctx, UpdateAwaitOpen, func(hctx workflow.Context) (BillView, error) {
+		if err := workflow.Await(hctx, func() bool { return billPersisted }); err != nil {
+			return BillView{}, err
+		}
+		return state.toView(), nil
+	}); err != nil {
+		return err
+	}
+
+	canCheckCh := workflow.NewBufferedChannel(ctx, 1)
+	if err := registerAddLineItem(ctx, state, canCheckCh, func() bool { return billPersisted }); err != nil {
+		return err
+	}
 
 	activityCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
 		StartToCloseTimeout: 30 * time.Second,
@@ -32,21 +47,11 @@ func BillWorkflow(ctx workflow.Context, input BillInput) error {
 		log.Error("PersistBill failed", "clientID", state.clientID, "period", state.period, "err", err)
 		return err
 	}
-
-	if err := workflow.SetUpdateHandler(ctx, UpdateAwaitOpen, func(workflow.Context) (BillView, error) {
-		return state.toView(), nil
-	}); err != nil {
-		return err
-	}
+	billPersisted = true
 
 	if err := workflow.SetQueryHandler(ctx, QueryGetBill, func() (BillView, error) {
 		return state.toView(), nil
 	}); err != nil {
-		return err
-	}
-
-	canCheckCh := workflow.NewBufferedChannel(ctx, 1)
-	if err := registerAddLineItem(ctx, state, canCheckCh); err != nil {
 		return err
 	}
 
@@ -84,11 +89,15 @@ func BillWorkflow(ctx workflow.Context, input BillInput) error {
 	return closeBill(ctx, state)
 }
 
-func registerAddLineItem(ctx workflow.Context, state *BillState, canCheckCh workflow.Channel) error {
+func registerAddLineItem(ctx workflow.Context, state *BillState, canCheckCh workflow.Channel, billPersisted func() bool) error {
 	return workflow.SetUpdateHandlerWithOptions(
 		ctx,
 		UpdateAddLineItem,
 		func(hctx workflow.Context, li LineItem) (LineItemResult, error) {
+			if err := workflow.Await(hctx, billPersisted); err != nil {
+				return LineItemResult{Reference: li.Reference}, err
+			}
+
 			activityCtx := workflow.WithActivityOptions(hctx, workflow.ActivityOptions{
 				StartToCloseTimeout: 30 * time.Second,
 				RetryPolicy: &temporal.RetryPolicy{

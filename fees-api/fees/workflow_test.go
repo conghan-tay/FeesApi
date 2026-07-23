@@ -106,7 +106,7 @@ func TestBillWorkflowAwaitOpenCompletesAfterPersistBill(t *testing.T) {
 				updateCompleted = true
 			},
 		})
-	}, time.Hour+time.Millisecond)
+	}, 0)
 	env.RegisterDelayedCallback(func() {
 		env.SignalWorkflow(SignalCloseBill, CloseSignal{Reason: "test-close"})
 	}, 2*time.Hour)
@@ -157,7 +157,7 @@ func TestBillWorkflowBuffersAddLineItemDuringStartup(t *testing.T) {
 				updateCompleted = true
 			},
 		}, item)
-	}, time.Hour+time.Millisecond)
+	}, 0)
 	env.RegisterDelayedCallback(func() {
 		env.SignalWorkflow(SignalCloseBill, CloseSignal{Reason: "test-close"})
 	}, 2*time.Hour)
