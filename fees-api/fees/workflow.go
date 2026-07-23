@@ -10,6 +10,7 @@ import (
 const (
 	BillWorkflowName = "BillWorkflow"
 
+	UpdateAwaitOpen   = "awaitOpen"
 	UpdateAddLineItem = "addLineItem"
 	SignalCloseBill   = "closeBill"
 	QueryGetBill      = "getBill"
@@ -18,6 +19,25 @@ const (
 func BillWorkflow(ctx workflow.Context, input BillInput) error {
 	log := workflow.GetLogger(ctx)
 	state := newBillState(input)
+
+	activityCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
+		StartToCloseTimeout: 30 * time.Second,
+		RetryPolicy: &temporal.RetryPolicy{
+			InitialInterval:    time.Second,
+			BackoffCoefficient: 2.0,
+			MaximumInterval:    time.Minute,
+		},
+	})
+	if err := workflow.ExecuteActivity(activityCtx, ActivityPersistBill, input).Get(activityCtx, nil); err != nil {
+		log.Error("PersistBill failed", "clientID", state.clientID, "period", state.period, "err", err)
+		return err
+	}
+
+	if err := workflow.SetUpdateHandler(ctx, UpdateAwaitOpen, func(workflow.Context) (BillView, error) {
+		return state.toView(), nil
+	}); err != nil {
+		return err
+	}
 
 	if err := workflow.SetQueryHandler(ctx, QueryGetBill, func() (BillView, error) {
 		return state.toView(), nil

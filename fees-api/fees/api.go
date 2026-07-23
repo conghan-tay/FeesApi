@@ -2,7 +2,23 @@ package fees
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"regexp"
+	"strconv"
 	"time"
+
+	"encore.dev/storage/sqldb"
+	enumspb "go.temporal.io/api/enums/v1"
+	"go.temporal.io/sdk/client"
+	"go.temporal.io/sdk/temporal"
+)
+
+var (
+	periodPattern   = regexp.MustCompile(`^\d{4}-(0[1-9]|1[0-2])$`)
+	currencyPattern = regexp.MustCompile(`^[A-Z]{3}$`)
 )
 
 type BillResource struct {
@@ -23,6 +39,92 @@ type ListBillsResponse struct {
 	HasMore    bool           `json:"hasMore"`
 }
 
+type OpenBillRequest struct {
+	ClientID string `json:"clientId"`
+	Currency string `json:"currency"`
+	Period   string `json:"period"`
+}
+
+type problemResponse struct {
+	Type     string `json:"type"`
+	Title    string `json:"title"`
+	Status   int    `json:"status"`
+	Detail   string `json:"detail"`
+	Instance string `json:"instance"`
+}
+
+//encore:api public raw method=POST path=/v1/bills
+func (s *Service) OpenBill(w http.ResponseWriter, req *http.Request) {
+	var input OpenBillRequest
+	decoder := json.NewDecoder(req.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&input); err != nil {
+		writeProblem(w, req, http.StatusBadRequest, "invalid-request", "Invalid request", "request body must be valid JSON")
+		return
+	}
+
+	billInput, validationErr := validateOpenBillRequest(input)
+	if validationErr != "" {
+		writeProblem(w, req, http.StatusBadRequest, "invalid-request", "Invalid request", validationErr)
+		return
+	}
+	if !time.Now().UTC().Before(resolvePeriodEnd(billInput.Period)) {
+		writeProblem(w, req, http.StatusUnprocessableEntity, "period-elapsed", "Period elapsed", "billing period has already elapsed")
+		return
+	}
+	if s == nil || s.temporalClient == nil {
+		writeProblem(w, req, http.StatusServiceUnavailable, "open-unavailable", "Open unavailable", "temporal client is not available")
+		return
+	}
+
+	id := billID(billInput.ClientID, billInput.Currency, billInput.Period)
+	startOp := s.temporalClient.NewWithStartWorkflowOperation(
+		client.StartWorkflowOptions{
+			ID:                       id,
+			TaskQueue:                s.temporalConfig.TaskQueue,
+			WorkflowIDConflictPolicy: enumspb.WORKFLOW_ID_CONFLICT_POLICY_FAIL,
+		},
+		BillWorkflow,
+		billInput,
+	)
+	handle, err := s.temporalClient.UpdateWithStartWorkflow(req.Context(), client.UpdateWithStartWorkflowOptions{
+		StartWorkflowOperation: startOp,
+		UpdateOptions: client.UpdateWorkflowOptions{
+			UpdateName:   UpdateAwaitOpen,
+			WaitForStage: client.WorkflowUpdateStageCompleted,
+		},
+	})
+	if err != nil {
+		writeOpenTemporalError(w, req, err)
+		return
+	}
+
+	var view BillView
+	if err := handle.Get(req.Context(), &view); err != nil {
+		writeOpenTemporalError(w, req, err)
+		return
+	}
+
+	resource, err := readOpenedBillResource(req.Context(), id)
+	if err != nil {
+		status := http.StatusInternalServerError
+		problemType := "internal-error"
+		title := "Internal error"
+		if errors.Is(err, sqldb.ErrNoRows) {
+			status = http.StatusServiceUnavailable
+			problemType = "open-unavailable"
+			title = "Open unavailable"
+		}
+		writeProblem(w, req, status, problemType, title, fmt.Sprintf("read opened bill %s: %v", id, err))
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Location", "/v1/bills/"+id)
+	w.WriteHeader(http.StatusCreated)
+	_ = json.NewEncoder(w).Encode(resource)
+}
+
 //encore:api public method=GET path=/v1/bills
 func (s *Service) ListBills(ctx context.Context) (*ListBillsResponse, error) {
 	return &ListBillsResponse{
@@ -30,4 +132,77 @@ func (s *Service) ListBills(ctx context.Context) (*ListBillsResponse, error) {
 		NextCursor: "",
 		HasMore:    false,
 	}, nil
+}
+
+func validateOpenBillRequest(input OpenBillRequest) (BillInput, string) {
+	if input.ClientID == "" {
+		return BillInput{}, "clientId is required"
+	}
+	if !currencyPattern.MatchString(input.Currency) {
+		return BillInput{}, "currency must be a three-letter uppercase ISO-4217 code"
+	}
+	if !periodPattern.MatchString(input.Period) {
+		return BillInput{}, "period must use YYYY-MM calendar-month format"
+	}
+	return BillInput{
+		ClientID: input.ClientID,
+		Currency: input.Currency,
+		Period:   input.Period,
+	}, ""
+}
+
+func writeOpenTemporalError(w http.ResponseWriter, req *http.Request, err error) {
+	if temporal.IsWorkflowExecutionAlreadyStartedError(err) {
+		writeProblem(w, req, http.StatusConflict, "bill-already-open", "Bill already open", "bill workflow already exists")
+		return
+	}
+	writeProblem(w, req, http.StatusServiceUnavailable, "open-unavailable", "Open unavailable", err.Error())
+}
+
+func writeProblem(w http.ResponseWriter, req *http.Request, status int, problemType, title, detail string) {
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(problemResponse{
+		Type:     problemType,
+		Title:    title,
+		Status:   status,
+		Detail:   detail,
+		Instance: req.URL.Path,
+	})
+}
+
+func readOpenedBillResource(ctx context.Context, id string) (*BillResource, error) {
+	var resource BillResource
+	var totalMinor int64
+	err := db.QueryRow(ctx, `
+		SELECT b.bill_id,
+		       b.client_id,
+		       b.currency,
+		       b.period,
+		       b.status,
+		       COALESCE(SUM(li.amount_minor), 0),
+		       COUNT(li.id),
+		       b.opened_at,
+		       b.closed_at
+		  FROM bills b
+		  LEFT JOIN line_items li ON li.bill_id = b.bill_id
+		 WHERE b.bill_id = $1
+		 GROUP BY b.bill_id, b.client_id, b.currency, b.period, b.status, b.opened_at, b.closed_at`,
+		id,
+	).Scan(
+		&resource.BillID,
+		&resource.ClientID,
+		&resource.Currency,
+		&resource.Period,
+		&resource.Status,
+		&totalMinor,
+		&resource.ItemCount,
+		&resource.OpenedAt,
+		&resource.ClosedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+	resource.TotalMinorAmount = strconv.FormatInt(totalMinor, 10)
+	return &resource, nil
 }
