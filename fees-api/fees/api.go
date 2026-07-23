@@ -4,12 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"regexp"
 	"strconv"
 	"time"
 
+	"encore.dev/rlog"
 	"encore.dev/storage/sqldb"
 	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/sdk/client"
@@ -83,6 +83,7 @@ func (s *Service) OpenBill(w http.ResponseWriter, req *http.Request) {
 			ID:                       id,
 			TaskQueue:                s.temporalConfig.TaskQueue,
 			WorkflowIDConflictPolicy: enumspb.WORKFLOW_ID_CONFLICT_POLICY_FAIL,
+			WorkflowIDReusePolicy:    enumspb.WORKFLOW_ID_REUSE_POLICY_REJECT_DUPLICATE,
 		},
 		BillWorkflow,
 		billInput,
@@ -110,12 +111,15 @@ func (s *Service) OpenBill(w http.ResponseWriter, req *http.Request) {
 		status := http.StatusInternalServerError
 		problemType := "internal-error"
 		title := "Internal error"
+		detail := "opened bill could not be read"
 		if errors.Is(err, sqldb.ErrNoRows) {
 			status = http.StatusServiceUnavailable
 			problemType = "open-unavailable"
 			title = "Open unavailable"
+			detail = "opened bill was not available after open completed; retry after a short delay"
 		}
-		writeProblem(w, req, status, problemType, title, fmt.Sprintf("read opened bill %s: %v", id, err))
+		rlog.Error("open bill: read opened bill failed", "billID", id, "problemType", problemType, "err", err)
+		writeProblem(w, req, status, problemType, title, detail)
 		return
 	}
 
@@ -156,7 +160,8 @@ func writeOpenTemporalError(w http.ResponseWriter, req *http.Request, err error)
 		writeProblem(w, req, http.StatusConflict, "bill-already-open", "Bill already open", "bill workflow already exists")
 		return
 	}
-	writeProblem(w, req, http.StatusServiceUnavailable, "open-unavailable", "Open unavailable", err.Error())
+	rlog.Error("open bill: temporal update failed", "problemType", "open-unavailable", "err", err)
+	writeProblem(w, req, http.StatusServiceUnavailable, "open-unavailable", "Open unavailable", "open workflow did not complete; retry after a short delay")
 }
 
 func writeProblem(w http.ResponseWriter, req *http.Request, status int, problemType, title, detail string) {

@@ -145,6 +145,9 @@ func TestOpenBillSuccessStartsWorkflowAndReturnsCreatedResource(t *testing.T) {
 	if temporalClient.startOptions.WorkflowIDConflictPolicy != enumspb.WORKFLOW_ID_CONFLICT_POLICY_FAIL {
 		t.Fatalf("conflict policy = %s, want FAIL", temporalClient.startOptions.WorkflowIDConflictPolicy)
 	}
+	if temporalClient.startOptions.WorkflowIDReusePolicy != enumspb.WORKFLOW_ID_REUSE_POLICY_REJECT_DUPLICATE {
+		t.Fatalf("reuse policy = %s, want REJECT_DUPLICATE", temporalClient.startOptions.WorkflowIDReusePolicy)
+	}
 	if temporalClient.updateOptions.UpdateName != UpdateAwaitOpen {
 		t.Fatalf("update name = %q, want %q", temporalClient.updateOptions.UpdateName, UpdateAwaitOpen)
 	}
@@ -231,9 +234,41 @@ func TestOpenBillAlreadyStartedReturns409(t *testing.T) {
 	assertProblem(t, resp, "bill-already-open", http.StatusConflict)
 }
 
-func TestOpenBillUpdateFailureReturns503(t *testing.T) {
+func TestOpenBillRejectsClosedWorkflowReuseAsDuplicate(t *testing.T) {
+	ctx := context.Background()
+	reqBody := OpenBillRequest{
+		ClientID: "api-closed-duplicate",
+		Currency: "USD",
+		Period:   "2099-01",
+	}
+	expectedBillID := billID(reqBody.ClientID, reqBody.Currency, reqBody.Period)
+	closedAt := time.Date(2099, 2, 1, 0, 0, 0, 0, time.UTC)
+	cleanupActivityBill(t, ctx, expectedBillID)
+	seedActivityBill(t, ctx, expectedBillID, reqBody.ClientID, reqBody.Currency, reqBody.Period, "CLOSED", &closedAt)
+
 	temporalClient := &openTemporalClient{
-		updateErr: errors.New("temporal unavailable"),
+		updateErr: serviceerror.NewWorkflowExecutionAlreadyStarted("closed workflow already exists", "", ""),
+	}
+	svc := &Service{
+		temporalClient: temporalClient,
+		temporalConfig: defaultTemporalConfig(),
+	}
+
+	resp := performOpenBill(t, svc, reqBody)
+
+	if resp.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409. Body: %s", resp.Code, resp.Body.String())
+	}
+	assertProblem(t, resp, "bill-already-open", http.StatusConflict)
+	if strings.Contains(resp.Body.String(), "CLOSED") {
+		t.Fatalf("problem response leaked closed bill body: %s", resp.Body.String())
+	}
+}
+
+func TestOpenBillUpdateFailureReturns503(t *testing.T) {
+	rawErr := "dial tcp 10.0.4.23:7233: connect: connection refused"
+	temporalClient := &openTemporalClient{
+		updateErr: errors.New(rawErr),
 	}
 	svc := &Service{
 		temporalClient: temporalClient,
@@ -250,11 +285,14 @@ func TestOpenBillUpdateFailureReturns503(t *testing.T) {
 		t.Fatalf("status = %d, want 503. Body: %s", resp.Code, resp.Body.String())
 	}
 	assertProblem(t, resp, "open-unavailable", http.StatusServiceUnavailable)
+	assertProblemDetail(t, resp, "open workflow did not complete; retry after a short delay")
+	assertProblemDoesNotContain(t, resp, rawErr)
 }
 
 func TestOpenBillHandleGetFailureReturns503(t *testing.T) {
+	rawErr := "persist failed: INSERT INTO bills host=10.0.4.23"
 	temporalClient := &openTemporalClient{
-		handle: &openUpdateHandle{err: errors.New("persist failed")},
+		handle: &openUpdateHandle{err: errors.New(rawErr)},
 	}
 	svc := &Service{
 		temporalClient: temporalClient,
@@ -271,6 +309,39 @@ func TestOpenBillHandleGetFailureReturns503(t *testing.T) {
 		t.Fatalf("status = %d, want 503. Body: %s", resp.Code, resp.Body.String())
 	}
 	assertProblem(t, resp, "open-unavailable", http.StatusServiceUnavailable)
+	assertProblemDetail(t, resp, "open workflow did not complete; retry after a short delay")
+	assertProblemDoesNotContain(t, resp, rawErr)
+}
+
+func TestOpenBillMissingLedgerRowAfterUpdateReturnsRedacted503(t *testing.T) {
+	rawBillID := "bill-api-missing-ledger-USD-2099-01"
+	temporalClient := &openTemporalClient{
+		handle: &openUpdateHandle{
+			view: BillView{
+				ClientID: "api-missing-ledger",
+				Currency: "USD",
+				Period:   "2099-01",
+				Status:   "OPEN",
+			},
+		},
+	}
+	svc := &Service{
+		temporalClient: temporalClient,
+		temporalConfig: defaultTemporalConfig(),
+	}
+
+	resp := performOpenBill(t, svc, OpenBillRequest{
+		ClientID: "api-missing-ledger",
+		Currency: "USD",
+		Period:   "2099-01",
+	})
+
+	if resp.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503. Body: %s", resp.Code, resp.Body.String())
+	}
+	assertProblem(t, resp, "open-unavailable", http.StatusServiceUnavailable)
+	assertProblemDetail(t, resp, "opened bill was not available after open completed; retry after a short delay")
+	assertProblemDoesNotContain(t, resp, rawBillID)
 }
 
 type openTemporalClient struct {
@@ -363,5 +434,25 @@ func assertProblem(t *testing.T, resp *httptest.ResponseRecorder, wantType strin
 	}
 	if problem.Status != wantStatus {
 		t.Fatalf("problem status = %d, want %d", problem.Status, wantStatus)
+	}
+}
+
+func assertProblemDetail(t *testing.T, resp *httptest.ResponseRecorder, wantDetail string) {
+	t.Helper()
+
+	var problem problemResponse
+	if err := json.Unmarshal(resp.Body.Bytes(), &problem); err != nil {
+		t.Fatalf("decode problem response: %v", err)
+	}
+	if problem.Detail != wantDetail {
+		t.Fatalf("problem detail = %q, want %q", problem.Detail, wantDetail)
+	}
+}
+
+func assertProblemDoesNotContain(t *testing.T, resp *httptest.ResponseRecorder, forbidden string) {
+	t.Helper()
+
+	if strings.Contains(resp.Body.String(), forbidden) {
+		t.Fatalf("problem response leaked %q: %s", forbidden, resp.Body.String())
 	}
 }
