@@ -125,3 +125,9 @@ To capture a simple count of tests run, passed, failed, and skipped:
 encore test -v ./... 2>&1 | tee /tmp/pavebank-test.log
 awk '/^--- PASS:/{pass++} /^--- FAIL:/{fail++} /^--- SKIP:/{skip++} END{printf "run=%d pass=%d fail=%d skip=%d\n", pass+fail+skip, pass, fail, skip}' /tmp/pavebank-test.log
 ```
+
+Run e2e tests with Encore and Temporal already running:
+
+```bash
+PAVEBANK_E2E=1 go test -v ./e2e -run TestFeesLifecycleE2E -count=1
+```
