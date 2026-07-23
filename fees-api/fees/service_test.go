@@ -38,6 +38,14 @@ func (c *fakeTemporalClient) NewWithStartWorkflowOperation(client.StartWorkflowO
 	return fakeWithStartWorkflowOperation{}
 }
 
+func (c *fakeTemporalClient) GetWorkflow(context.Context, string, string) client.WorkflowRun {
+	return fakeWorkflowRun{}
+}
+
+func (c *fakeTemporalClient) SignalWorkflow(context.Context, string, string, string, interface{}) error {
+	return nil
+}
+
 func (c *fakeTemporalClient) UpdateWorkflow(context.Context, client.UpdateWorkflowOptions) (client.WorkflowUpdateHandle, error) {
 	return nil, nil
 }
@@ -50,6 +58,24 @@ type fakeWithStartWorkflowOperation struct{}
 
 func (fakeWithStartWorkflowOperation) Get(context.Context) (client.WorkflowRun, error) {
 	return nil, nil
+}
+
+type fakeWorkflowRun struct{}
+
+func (fakeWorkflowRun) Get(context.Context, interface{}) error {
+	return nil
+}
+
+func (fakeWorkflowRun) GetID() string {
+	return ""
+}
+
+func (fakeWorkflowRun) GetRunID() string {
+	return ""
+}
+
+func (fakeWorkflowRun) GetWithOptions(context.Context, interface{}, client.WorkflowRunGetOptions) error {
+	return nil
 }
 
 type fakeTemporalWorker struct {
