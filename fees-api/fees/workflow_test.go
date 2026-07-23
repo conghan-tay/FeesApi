@@ -182,7 +182,7 @@ func TestBillWorkflowRejectsCurrencyMismatchInValidator(t *testing.T) {
 	env.AssertNumberOfCalls(t, ActivityPersistLineItem, 0)
 }
 
-func TestBillWorkflowRejectsAddAfterCloseStarted(t *testing.T) {
+func TestBillWorkflowRejectsAddDuringClosing(t *testing.T) {
 	env := newBillWorkflowTestEnv()
 	in := testBillInput()
 
@@ -214,6 +214,61 @@ func TestBillWorkflowRejectsAddAfterCloseStarted(t *testing.T) {
 	}
 	env.AssertExpectations(t)
 	env.AssertNumberOfCalls(t, ActivityPersistLineItem, 0)
+}
+
+func TestBillWorkflowRejectsAddDuringDraining(t *testing.T) {
+	env := newBillWorkflowTestEnv()
+	in := testBillInput()
+	inFlightItem := testLineItem("ref-in-flight", "USD")
+	inFlightRow := testLedgerRow(in, inFlightItem)
+	rejectedItem := testLineItem("ref-during-draining", "USD")
+	rejectedRow := testLedgerRow(in, rejectedItem)
+
+	lineItemCall := env.OnActivity(ActivityPersistLineItem, mock.Anything, inFlightRow).
+		After(time.Hour).
+		Return(true, nil).
+		Once()
+	env.OnActivity(ActivityPersistInvoice, mock.Anything, billID(in.ClientID, in.Currency, in.Period)).
+		Return(testClosedBillView(in), nil).
+		NotBefore(lineItemCall).
+		Once()
+
+	var rejected bool
+	env.RegisterDelayedCallback(func() {
+		env.UpdateWorkflow(UpdateAddLineItem, "update-in-flight", &testsuite.TestUpdateCallback{
+			OnReject: func(err error) {
+				t.Errorf("in-flight update rejected: %v", err)
+			},
+			OnComplete: func(_ interface{}, err error) {
+				if err != nil {
+					t.Errorf("in-flight update completed with error: %v", err)
+				}
+			},
+		}, inFlightItem)
+	}, 0)
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow(SignalCloseBill, CloseSignal{Reason: "test-close"})
+	}, time.Minute)
+	env.RegisterDelayedCallback(func() {
+		env.UpdateWorkflow(UpdateAddLineItem, "update-during-draining", &testsuite.TestUpdateCallback{
+			OnReject: func(err error) {
+				assertApplicationErrorType(t, err, "BillNotOpen")
+				rejected = true
+			},
+			OnAccept: func() {
+				t.Error("add-during-draining update was accepted, want validator reject")
+			},
+		}, rejectedItem)
+	}, 2*time.Minute)
+
+	env.ExecuteWorkflow(BillWorkflow, in)
+	assertBillWorkflowCompleted(t, env)
+	if !rejected {
+		t.Fatal("add-during-draining update was not rejected")
+	}
+	env.AssertExpectations(t)
+	env.AssertNumberOfCalls(t, ActivityPersistLineItem, 1)
+	env.AssertNotCalled(t, ActivityPersistLineItem, mock.Anything, rejectedRow)
 }
 
 func TestBillWorkflowExplicitCloseSealsBill(t *testing.T) {
@@ -296,6 +351,12 @@ func TestBillWorkflowContinueAsNewCarriesStatus(t *testing.T) {
 
 	env.ExecuteWorkflow(BillWorkflow, in)
 
+	assertContinueAsNewCarriesStatus(t, env, in)
+}
+
+func assertContinueAsNewCarriesStatus(t *testing.T, env *testsuite.TestWorkflowEnvironment, in BillInput) {
+	t.Helper()
+
 	err := env.GetWorkflowError()
 	if err == nil {
 		t.Fatal("expected Continue-As-New workflow error, got nil")
@@ -321,6 +382,50 @@ func TestBillWorkflowContinueAsNewCarriesStatus(t *testing.T) {
 	if carried != want {
 		t.Fatalf("Continue-As-New input = %#v, want %#v", carried, want)
 	}
+}
+
+func TestBillWorkflowCANWakesFromUpdateHandler(t *testing.T) {
+	env := newBillWorkflowTestEnv()
+	in := testBillInput()
+	item := testLineItem("ref-can", "USD")
+	row := testLedgerRow(in, item)
+
+	env.OnActivity(ActivityPersistLineItem, mock.Anything, row).
+		Run(func(mock.Arguments) {
+			env.SetContinueAsNewSuggested(true)
+		}).
+		Return(true, nil).
+		Once()
+
+	var updateCompleted bool
+	env.RegisterDelayedCallback(func() {
+		env.UpdateWorkflow(UpdateAddLineItem, "update-triggers-can", &testsuite.TestUpdateCallback{
+			OnReject: func(err error) {
+				t.Errorf("CAN-triggering update rejected: %v", err)
+			},
+			OnComplete: func(result interface{}, err error) {
+				if err != nil {
+					t.Errorf("CAN-triggering update completed with error: %v", err)
+					return
+				}
+				got := result.(LineItemResult)
+				want := LineItemResult{Reference: item.Reference, Applied: true}
+				if got != want {
+					t.Errorf("LineItemResult = %#v, want %#v", got, want)
+					return
+				}
+				updateCompleted = true
+			},
+		}, item)
+	}, 0)
+
+	env.ExecuteWorkflow(BillWorkflow, in)
+
+	if !updateCompleted {
+		t.Fatal("CAN-triggering update did not complete")
+	}
+	assertContinueAsNewCarriesStatus(t, env, in)
+	env.AssertExpectations(t)
 }
 
 func newBillWorkflowTestEnv() *testsuite.TestWorkflowEnvironment {

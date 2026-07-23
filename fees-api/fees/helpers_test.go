@@ -90,7 +90,7 @@ func TestBillStatusStringAndAcceptsAccruals(t *testing.T) {
 		accepts bool
 	}{
 		{status: OPEN, want: "OPEN", accepts: true},
-		{status: DRAINING, want: "DRAINING", accepts: true},
+		{status: DRAINING, want: "DRAINING", accepts: false},
 		{status: CLOSING, want: "CLOSING", accepts: false},
 		{status: CLOSED, want: "CLOSED", accepts: false},
 		{status: BillStatus(99), want: "UNKNOWN", accepts: false},

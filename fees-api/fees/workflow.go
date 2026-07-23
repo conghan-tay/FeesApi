@@ -25,7 +25,8 @@ func BillWorkflow(ctx workflow.Context, input BillInput) error {
 		return err
 	}
 
-	if err := registerAddLineItem(ctx, state); err != nil {
+	canCheckCh := workflow.NewBufferedChannel(ctx, 1)
+	if err := registerAddLineItem(ctx, state, canCheckCh); err != nil {
 		return err
 	}
 
@@ -54,13 +55,16 @@ func BillWorkflow(ctx workflow.Context, input BillInput) error {
 			log.Info("auto-close timer fired", "clientID", state.clientID, "period", state.period)
 			state.status = DRAINING
 		})
+		selector.AddReceive(canCheckCh, func(c workflow.ReceiveChannel, _ bool) {
+			c.Receive(ctx, nil)
+		})
 		selector.Select(ctx)
 	}
 
 	return closeBill(ctx, state)
 }
 
-func registerAddLineItem(ctx workflow.Context, state *BillState) error {
+func registerAddLineItem(ctx workflow.Context, state *BillState, canCheckCh workflow.Channel) error {
 	return workflow.SetUpdateHandlerWithOptions(
 		ctx,
 		UpdateAddLineItem,
@@ -81,10 +85,11 @@ func registerAddLineItem(ctx workflow.Context, state *BillState) error {
 				return LineItemResult{Reference: li.Reference}, err
 			}
 
+			canCheckCh.SendAsync(struct{}{})
 			return LineItemResult{Reference: li.Reference, Applied: applied}, nil
 		},
 		workflow.UpdateHandlerOptions{
-			Validator: func(li LineItem) error {
+			Validator: func(_ workflow.Context, li LineItem) error {
 				if li.Currency != state.currency {
 					return temporal.NewApplicationError(
 						"currency mismatch: item "+li.Currency+" != bill "+state.currency,
