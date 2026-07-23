@@ -25,8 +25,14 @@ record and all queryable invoice facts.
 - Step #1 complete: Encore service scaffold, Temporal client/worker startup, and
   placeholder `GET /v1/bills`.
 - Step #2 complete: opt-in E2E client/dashboard and README skeleton.
-- Steps #3-#12 upcoming: schema, money helpers, activities, workflow, open/add/
-  close endpoints, ledger reads, auto-close edge cases, and final docs.
+- Steps #3-#7 complete: ledger schema, domain helpers, activities, workflow, and
+  `POST /v1/bills`.
+- Step #8 complete: `POST /v1/bills/{billId}/line-items` calls the
+  `addLineItem` Workflow Update, returning `201` for fresh items, `200` for
+  duplicate references, `400` for currency mismatch, `409` for closed bills, and
+  `404` when no open bill workflow exists.
+- Steps #9-#12 upcoming: close endpoint, ledger reads, auto-close edge cases, and
+  final docs.
 
 ## Local Smoke
 
@@ -118,4 +124,10 @@ To capture a simple count of tests run, passed, failed, and skipped:
 ```bash
 encore test -v ./... 2>&1 | tee /tmp/pavebank-test.log
 awk '/^--- PASS:/{pass++} /^--- FAIL:/{fail++} /^--- SKIP:/{skip++} END{printf "run=%d pass=%d fail=%d skip=%d\n", pass+fail+skip, pass, fail, skip}' /tmp/pavebank-test.log
+```
+
+Run e2e tests with Encore and Temporal already running:
+
+```bash
+PAVEBANK_E2E=1 go test -v ./e2e -run TestFeesLifecycleE2E -count=1
 ```
