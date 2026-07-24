@@ -240,6 +240,38 @@ func TestActivityPersistInvoiceSealsOpenBill(t *testing.T) {
 	}
 }
 
+func TestActivityPersistInvoiceZeroItemBillReadsAsEmptyInvoice(t *testing.T) {
+	ctx := context.Background()
+	activities := NewActivities(db)
+	billID := "bill-activity-seal-zero-USD-2099-01"
+	cleanupActivityBill(t, ctx, billID)
+	seedActivityBill(t, ctx, billID, "activity-seal-zero", "USD", "2099-01", "OPEN", nil)
+
+	if _, err := activities.ActivityPersistInvoice(ctx, billID); err != nil {
+		t.Fatalf("ActivityPersistInvoice zero-item bill returned error: %v", err)
+	}
+
+	invoice, err := readClosedInvoiceResource(ctx, billID)
+	if err != nil {
+		t.Fatalf("read sealed zero-item invoice: %v", err)
+	}
+	if invoice.Status != "CLOSED" {
+		t.Fatalf("status = %q, want CLOSED", invoice.Status)
+	}
+	if invoice.TotalMinorAmount != "0" || invoice.ItemCount != 0 {
+		t.Fatalf("total/count = %s/%d, want 0/0", invoice.TotalMinorAmount, invoice.ItemCount)
+	}
+	if invoice.ClosedAt == nil {
+		t.Fatal("closedAt is nil, want seal timestamp")
+	}
+	if invoice.LineItems == nil {
+		t.Fatal("lineItems is nil, want empty slice")
+	}
+	if len(invoice.LineItems) != 0 {
+		t.Fatalf("lineItems length = %d, want 0", len(invoice.LineItems))
+	}
+}
+
 func TestActivityPersistInvoiceIsIdempotentForClosedBill(t *testing.T) {
 	ctx := context.Background()
 	activities := NewActivities(db)
