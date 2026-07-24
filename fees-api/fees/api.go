@@ -197,13 +197,13 @@ func (s *Service) AddLineItem(w http.ResponseWriter, req *http.Request) {
 		WaitForStage: client.WorkflowUpdateStageCompleted,
 	})
 	if err != nil {
-		writeAddLineItemTemporalError(w, req, err)
+		writeAddLineItemTemporalError(w, req, billID, err)
 		return
 	}
 
 	var result LineItemResult
 	if err := handle.Get(req.Context(), &result); err != nil {
-		writeAddLineItemTemporalError(w, req, err)
+		writeAddLineItemTemporalError(w, req, billID, err)
 		return
 	}
 
@@ -347,7 +347,7 @@ func writeOpenTemporalError(w http.ResponseWriter, req *http.Request, err error)
 	writeProblem(w, req, http.StatusServiceUnavailable, "open-unavailable", "Open unavailable", "open workflow did not complete; retry after a short delay")
 }
 
-func writeAddLineItemTemporalError(w http.ResponseWriter, req *http.Request, err error) {
+func writeAddLineItemTemporalError(w http.ResponseWriter, req *http.Request, billID string, err error) {
 	var appErr *temporal.ApplicationError
 	if errors.As(err, &appErr) {
 		switch appErr.Type() {
@@ -362,11 +362,31 @@ func writeAddLineItemTemporalError(w http.ResponseWriter, req *http.Request, err
 
 	var notFoundErr *serviceerror.NotFound
 	if errors.As(err, &notFoundErr) {
-		writeProblem(w, req, http.StatusNotFound, "no-open-bill", "No open bill", "no open bill workflow exists for billId")
+		writeAddLineItemNotFoundFallback(w, req, billID, err)
 		return
 	}
 
 	rlog.Error("add line item: temporal update failed", "problemType", "add-line-item-unavailable", "err", err)
+	writeProblem(w, req, http.StatusServiceUnavailable, "add-line-item-unavailable", "Add line item unavailable", "add-line-item update did not complete; retry after a short delay")
+}
+
+func writeAddLineItemNotFoundFallback(w http.ResponseWriter, req *http.Request, billID string, temporalErr error) {
+	resource, err := readBillResource(req.Context(), billID)
+	if errors.Is(err, sqldb.ErrNoRows) {
+		writeProblem(w, req, http.StatusNotFound, "no-bill", "No bill", "bill does not exist")
+		return
+	}
+	if err != nil {
+		rlog.Error("add line item: ledger fallback failed", "billID", billID, "problemType", "add-line-item-unavailable", "err", err)
+		writeProblem(w, req, http.StatusServiceUnavailable, "add-line-item-unavailable", "Add line item unavailable", "add-line-item update did not complete; retry after a short delay")
+		return
+	}
+	if resource.Status == CLOSED.String() {
+		writeProblem(w, req, http.StatusConflict, "bill-closed", "Bill closed", "bill is closed and cannot accept line items")
+		return
+	}
+
+	rlog.Error("add line item: workflow missing for ledger bill", "billID", billID, "status", resource.Status, "problemType", "add-line-item-unavailable", "err", temporalErr)
 	writeProblem(w, req, http.StatusServiceUnavailable, "add-line-item-unavailable", "Add line item unavailable", "add-line-item update did not complete; retry after a short delay")
 }
 

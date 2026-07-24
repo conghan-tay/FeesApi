@@ -471,13 +471,13 @@ func TestAddLineItemTemporalErrorMapping(t *testing.T) {
 			name:       "direct not found",
 			directErr:  serviceerror.NewNotFound("workflow not found"),
 			wantStatus: http.StatusNotFound,
-			wantType:   "no-open-bill",
+			wantType:   "no-bill",
 		},
 		{
 			name:       "handle not found",
 			handleErr:  serviceerror.NewNotFound("workflow not found"),
 			wantStatus: http.StatusNotFound,
-			wantType:   "no-open-bill",
+			wantType:   "no-bill",
 		},
 		{
 			name:       "currency mismatch",
@@ -528,6 +528,94 @@ func TestAddLineItemTemporalErrorMapping(t *testing.T) {
 			}
 			assertProblem(t, resp, tt.wantType, tt.wantStatus)
 			assertProblemDoesNotContain(t, resp, "10.0.4.23")
+		})
+	}
+}
+
+func TestAddLineItemWorkflowNotFoundLedgerFallback(t *testing.T) {
+	ctx := context.Background()
+	closedAt := time.Date(2099, 2, 1, 0, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name       string
+		directErr  error
+		handleErr  error
+		status     string
+		closedAt   *time.Time
+		wantStatus int
+		wantType   string
+	}{
+		{
+			name:       "direct missing ledger bill",
+			directErr:  serviceerror.NewNotFound("workflow not found"),
+			wantStatus: http.StatusNotFound,
+			wantType:   "no-bill",
+		},
+		{
+			name:       "handle missing ledger bill",
+			handleErr:  serviceerror.NewNotFound("workflow not found"),
+			wantStatus: http.StatusNotFound,
+			wantType:   "no-bill",
+		},
+		{
+			name:       "direct closed ledger bill",
+			directErr:  serviceerror.NewNotFound("workflow not found"),
+			status:     "CLOSED",
+			closedAt:   &closedAt,
+			wantStatus: http.StatusConflict,
+			wantType:   "bill-closed",
+		},
+		{
+			name:       "handle closed ledger bill",
+			handleErr:  serviceerror.NewNotFound("workflow not found"),
+			status:     "CLOSED",
+			closedAt:   &closedAt,
+			wantStatus: http.StatusConflict,
+			wantType:   "bill-closed",
+		},
+		{
+			name:       "direct open ledger bill",
+			directErr:  serviceerror.NewNotFound("workflow not found"),
+			status:     "OPEN",
+			wantStatus: http.StatusServiceUnavailable,
+			wantType:   "add-line-item-unavailable",
+		},
+		{
+			name:       "handle open ledger bill",
+			handleErr:  serviceerror.NewNotFound("workflow not found"),
+			status:     "OPEN",
+			wantStatus: http.StatusServiceUnavailable,
+			wantType:   "add-line-item-unavailable",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			billID := "bill-api-add-fallback-" + strings.ReplaceAll(tt.name, " ", "-") + "-USD-2099-01"
+			cleanupActivityBill(t, ctx, billID)
+			if tt.status != "" {
+				clientID := strings.TrimSuffix(strings.TrimPrefix(billID, "bill-"), "-USD-2099-01")
+				seedActivityBill(t, ctx, billID, clientID, "USD", "2099-01", tt.status, tt.closedAt)
+			}
+
+			temporalClient := &openTemporalClient{
+				workflowErr: tt.directErr,
+				workflowHandle: &openUpdateHandle{
+					err: tt.handleErr,
+				},
+			}
+			resp := performAddLineItem(t, &Service{temporalClient: temporalClient}, billID, AddLineItemRequest{
+				Reference:   "ref-fallback",
+				MinorAmount: "1500",
+				Currency:    "USD",
+				FeeType:     "wire_transfer",
+				Description: "Outbound USD wire",
+			})
+
+			if resp.Code != tt.wantStatus {
+				t.Fatalf("status = %d, want %d. Body: %s", resp.Code, tt.wantStatus, resp.Body.String())
+			}
+			assertProblem(t, resp, tt.wantType, tt.wantStatus)
+			assertProblemDoesNotContain(t, resp, "workflow not found")
 		})
 	}
 }
