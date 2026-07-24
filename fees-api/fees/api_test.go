@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -109,6 +110,73 @@ func TestGetBillWithLineItemsIncludesOrderedItems(t *testing.T) {
 	}
 	if invoice.LineItems[0].Reference != "ref-get-items-001" || invoice.LineItems[1].Reference != "ref-get-items-002" {
 		t.Fatalf("line item order = %#v, want insertion order", invoice.LineItems)
+	}
+}
+
+func TestReadBillWithLineItemsResourceHasConsistentAggregates(t *testing.T) {
+	ctx := context.Background()
+	billID := "bill-api-get-consistent-USD-2099-01"
+	cleanupActivityBill(t, ctx, billID)
+	seedActivityBill(t, ctx, billID, "api-get-consistent", "USD", "2099-01", "OPEN", nil)
+	seedAPILineItem(t, ctx, billID, "ref-consistent-001", 1500, "USD", "wire_transfer", "Outbound wire")
+	seedAPILineItem(t, ctx, billID, "ref-consistent-002", -250, "USD", "correction", "Fee correction")
+
+	invoice, err := readBillWithLineItemsResource(ctx, billID)
+	if err != nil {
+		t.Fatalf("read bill with line items: %v", err)
+	}
+
+	if invoice.ItemCount != len(invoice.LineItems) {
+		t.Fatalf("itemCount = %d, want len(lineItems) %d", invoice.ItemCount, len(invoice.LineItems))
+	}
+	if len(invoice.LineItems) != 2 {
+		t.Fatalf("lineItems length = %d, want 2", len(invoice.LineItems))
+	}
+
+	var total int64
+	sawCredit := false
+	for _, item := range invoice.LineItems {
+		amount, err := strconv.ParseInt(item.MinorAmount, 10, 64)
+		if err != nil {
+			t.Fatalf("parse line item amount %q: %v", item.MinorAmount, err)
+		}
+		if amount < 0 {
+			sawCredit = true
+		}
+		total += amount
+	}
+	if !sawCredit {
+		t.Fatal("expected returned lineItems to include a negative credit row")
+	}
+	if invoice.TotalMinorAmount != strconv.FormatInt(total, 10) {
+		t.Fatalf("totalMinorAmount = %q, want sum(lineItems) %d", invoice.TotalMinorAmount, total)
+	}
+	if invoice.TotalMinorAmount != "1250" {
+		t.Fatalf("totalMinorAmount = %q, want 1250 including negative credit", invoice.TotalMinorAmount)
+	}
+}
+
+func TestReadBillWithLineItemsResourceZeroItems(t *testing.T) {
+	ctx := context.Background()
+	billID := "bill-api-get-zero-items-USD-2099-01"
+	cleanupActivityBill(t, ctx, billID)
+	seedActivityBill(t, ctx, billID, "api-get-zero-items", "USD", "2099-01", "OPEN", nil)
+
+	invoice, err := readBillWithLineItemsResource(ctx, billID)
+	if err != nil {
+		t.Fatalf("read bill with zero line items: %v", err)
+	}
+	if invoice.TotalMinorAmount != "0" {
+		t.Fatalf("totalMinorAmount = %q, want 0", invoice.TotalMinorAmount)
+	}
+	if invoice.ItemCount != 0 {
+		t.Fatalf("itemCount = %d, want 0", invoice.ItemCount)
+	}
+	if invoice.LineItems == nil {
+		t.Fatal("lineItems is nil, want empty slice")
+	}
+	if len(invoice.LineItems) != 0 {
+		t.Fatalf("lineItems length = %d, want 0", len(invoice.LineItems))
 	}
 }
 

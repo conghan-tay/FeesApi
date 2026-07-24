@@ -34,14 +34,23 @@ type listBillsCursor struct {
 	BillID   string `json:"billId"`
 }
 
+type ledgerQuerier interface {
+	QueryRow(ctx context.Context, query string, args ...interface{}) *sqldb.Row
+	Query(ctx context.Context, query string, args ...interface{}) (*sqldb.Rows, error)
+}
+
 func readOpenedBillResource(ctx context.Context, id string) (*BillResource, error) {
 	return readBillResource(ctx, id)
 }
 
 func readBillResource(ctx context.Context, id string) (*BillResource, error) {
+	return readBillResourceFrom(ctx, db, id)
+}
+
+func readBillResourceFrom(ctx context.Context, q ledgerQuerier, id string) (*BillResource, error) {
 	var resource BillResource
 	var totalMinor int64
-	err := db.QueryRow(ctx, `
+	err := q.QueryRow(ctx, `
 		SELECT b.bill_id,
 		       b.client_id,
 		       b.currency,
@@ -74,16 +83,70 @@ func readBillResource(ctx context.Context, id string) (*BillResource, error) {
 	return &resource, nil
 }
 
+func readBillMetadataFrom(ctx context.Context, q ledgerQuerier, id string) (*BillResource, error) {
+	var resource BillResource
+	err := q.QueryRow(ctx, `
+		SELECT bill_id,
+		       client_id,
+		       currency,
+		       period,
+		       status,
+		       opened_at,
+		       closed_at
+		  FROM bills
+		 WHERE bill_id = $1`,
+		id,
+	).Scan(
+		&resource.BillID,
+		&resource.ClientID,
+		&resource.Currency,
+		&resource.Period,
+		&resource.Status,
+		&resource.OpenedAt,
+		&resource.ClosedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+	resource.TotalMinorAmount = "0"
+	resource.ItemCount = 0
+	return &resource, nil
+}
+
 func readBillWithLineItemsResource(ctx context.Context, id string) (*InvoiceResource, error) {
-	resource, err := readBillResource(ctx, id)
+	tx, err := db.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin repeatable-read bill detail transaction: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	if _, err := tx.Exec(ctx, `SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY`); err != nil {
+		return nil, fmt.Errorf("set repeatable-read bill detail transaction: %w", err)
+	}
+
+	resource, err := readBillMetadataFrom(ctx, tx, id)
 	if err != nil {
 		return nil, err
 	}
 
-	items, err := readBillLineItems(ctx, id)
+	items, err := readBillLineItemsFrom(ctx, tx, id)
 	if err != nil {
 		return nil, err
 	}
+
+	if err := applyLineItemAggregates(resource, items); err != nil {
+		return nil, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit repeatable-read bill detail transaction: %w", err)
+	}
+	committed = true
 
 	return &InvoiceResource{
 		BillResource: *resource,
@@ -103,7 +166,11 @@ func readClosedInvoiceResource(ctx context.Context, id string) (*InvoiceResource
 }
 
 func readBillLineItems(ctx context.Context, id string) ([]LineItemResource, error) {
-	rows, err := db.Query(ctx, `
+	return readBillLineItemsFrom(ctx, db, id)
+}
+
+func readBillLineItemsFrom(ctx context.Context, q ledgerQuerier, id string) ([]LineItemResource, error) {
+	rows, err := q.Query(ctx, `
 		SELECT reference,
 		       amount_minor,
 		       currency,
@@ -141,6 +208,20 @@ func readBillLineItems(ctx context.Context, id string) ([]LineItemResource, erro
 		return nil, err
 	}
 	return items, nil
+}
+
+func applyLineItemAggregates(resource *BillResource, items []LineItemResource) error {
+	var totalMinor int64
+	for _, item := range items {
+		amountMinor, err := strconv.ParseInt(item.MinorAmount, 10, 64)
+		if err != nil {
+			return fmt.Errorf("parse line item amount %q: %w", item.MinorAmount, err)
+		}
+		totalMinor += amountMinor
+	}
+	resource.TotalMinorAmount = strconv.FormatInt(totalMinor, 10)
+	resource.ItemCount = len(items)
+	return nil
 }
 
 func listBillResources(ctx context.Context, opts listBillsOptions) (*ListBillsResponse, error) {
