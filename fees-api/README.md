@@ -36,8 +36,10 @@ record and all queryable invoice facts.
   itemized line items. Re-closing a sealed bill returns the existing invoice
   directly from the ledger, so it also works after the workflow is no longer
   signalable.
-- Steps #10-#12 upcoming: GET/LIST ledger reads, auto-close edge cases, and
-  final docs.
+- Step #10 complete: `GET /v1/bills/{billId}` and `GET /v1/bills` read directly
+  from Postgres, compute totals/counts from `line_items`, support optional
+  itemized detail on GET, and provide filtered cursor pagination for LIST.
+- Steps #11-#12 upcoming: auto-close edge cases and final docs.
 
 ## Local Smoke
 
@@ -53,7 +55,7 @@ In another terminal, start Encore from this directory:
 encore run
 ```
 
-Then call the scaffold endpoint:
+Then call the list endpoint:
 
 ```bash
 curl http://localhost:4000/v1/bills
@@ -65,9 +67,9 @@ Expected response:
 {"bills":[],"nextCursor":"","hasMore":false}
 ```
 
-The scaffold worker connects to Temporal at `127.0.0.1:7233`, namespace `default`,
-and polls task queue `fees`. Encore provisions the `feesdb` Postgres database; the
-ledger schema is intentionally deferred to Build Plan #3.
+The worker connects to Temporal at `127.0.0.1:7233`, namespace `default`, and
+polls task queue `fees`. Encore provisions the `feesdb` Postgres database and
+applies the ledger migrations.
 
 ## E2E Dashboard
 
@@ -98,9 +100,9 @@ turns green incrementally:
 - re-close returns the same sealed invoice facts
 - GET and LIST expose the computed ledger total
 
-After Step #9, close, re-close, and add-after-close behavior is implemented and
-covered by unit/integration tests. The monolithic E2E test still depends on Step
-#10 because it includes `GET /v1/bills/{billId}` and LIST assertions.
+After Step #10, GET and LIST are implemented and covered by unit/integration
+tests. The monolithic E2E test's read assertions are expected to pass once the
+local Temporal and Encore stack is running.
 
 ## Configuration Notes
 
