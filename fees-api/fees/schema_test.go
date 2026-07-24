@@ -100,6 +100,31 @@ func TestCurrenciesSeedRows(t *testing.T) {
 	}
 }
 
+func TestSupportedCurrencyLookupUsesCurrenciesTable(t *testing.T) {
+	ctx := context.Background()
+
+	tests := []struct {
+		code string
+		want bool
+	}{
+		{code: "GEL", want: true},
+		{code: "USD", want: true},
+		{code: "EUR", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.code, func(t *testing.T) {
+			got, err := isSupportedCurrency(ctx, tt.code)
+			if err != nil {
+				t.Fatalf("isSupportedCurrency(%q): %v", tt.code, err)
+			}
+			if got != tt.want {
+				t.Fatalf("isSupportedCurrency(%q) = %v, want %v", tt.code, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestLedgerConstraintsRejectBadInserts(t *testing.T) {
 	ctx := context.Background()
 	// Bad status is rejected by the CHECK.
