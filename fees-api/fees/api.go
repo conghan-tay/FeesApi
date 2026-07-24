@@ -1,7 +1,6 @@
 package fees
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -275,13 +274,55 @@ func (s *Service) CloseBill(w http.ResponseWriter, req *http.Request) {
 	writeClosedInvoice(w, req, id)
 }
 
-//encore:api public method=GET path=/v1/bills
-func (s *Service) ListBills(ctx context.Context) (*ListBillsResponse, error) {
-	return &ListBillsResponse{
-		Bills:      []BillResource{},
-		NextCursor: "",
-		HasMore:    false,
-	}, nil
+//encore:api public raw method=GET path=/v1/bills/:billId
+func (s *Service) GetBill(w http.ResponseWriter, req *http.Request) {
+	id := currentBillID(req)
+	if id == "" {
+		writeProblem(w, req, http.StatusBadRequest, "invalid-request", "Invalid request", "billId is required")
+		return
+	}
+
+	includeLineItems, ok := parseIncludeLineItems(w, req)
+	if !ok {
+		return
+	}
+
+	if includeLineItems {
+		resource, err := readBillWithLineItemsResource(req.Context(), id)
+		if err != nil {
+			writeReadBillError(w, req, id, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, resource)
+		return
+	}
+
+	resource, err := readBillResource(req.Context(), id)
+	if err != nil {
+		writeReadBillError(w, req, id, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, resource)
+}
+
+//encore:api public raw method=GET path=/v1/bills
+func (s *Service) ListBills(w http.ResponseWriter, req *http.Request) {
+	opts, ok := parseListBillsOptions(w, req)
+	if !ok {
+		return
+	}
+
+	resp, err := listBillResources(req.Context(), opts)
+	if err != nil {
+		if errors.Is(err, errInvalidCursor) {
+			writeProblem(w, req, http.StatusBadRequest, "invalid-request", "Invalid request", "cursor is invalid")
+			return
+		}
+		rlog.Error("list bills: read failed", "problemType", "list-unavailable", "err", err)
+		writeProblem(w, req, http.StatusServiceUnavailable, "list-unavailable", "List unavailable", "bills could not be listed; retry after a short delay")
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func validateOpenBillRequest(input OpenBillRequest) (BillInput, string) {
@@ -336,6 +377,61 @@ func decodeCloseBillRequest(w http.ResponseWriter, req *http.Request) (CloseBill
 		return CloseBillRequest{}, false
 	}
 	return input, true
+}
+
+func parseIncludeLineItems(w http.ResponseWriter, req *http.Request) (bool, bool) {
+	raw := req.URL.Query().Get("includeLineItems")
+	if raw == "" {
+		return false, true
+	}
+
+	includeLineItems, err := strconv.ParseBool(raw)
+	if err != nil {
+		writeProblem(w, req, http.StatusBadRequest, "invalid-request", "Invalid request", "includeLineItems must be a boolean")
+		return false, false
+	}
+	return includeLineItems, true
+}
+
+func parseListBillsOptions(w http.ResponseWriter, req *http.Request) (listBillsOptions, bool) {
+	values := req.URL.Query()
+	opts := listBillsOptions{
+		ClientID: values.Get("clientId"),
+		Status:   values.Get("status"),
+		Currency: values.Get("currency"),
+		Period:   values.Get("period"),
+		Cursor:   values.Get("cursor"),
+	}
+
+	if opts.Status != "" && opts.Status != OPEN.String() && opts.Status != CLOSED.String() {
+		writeProblem(w, req, http.StatusBadRequest, "invalid-request", "Invalid request", "status must be OPEN or CLOSED")
+		return listBillsOptions{}, false
+	}
+	if opts.Currency != "" && !currencyPattern.MatchString(opts.Currency) {
+		writeProblem(w, req, http.StatusBadRequest, "invalid-request", "Invalid request", "currency must be a three-letter uppercase ISO-4217 code")
+		return listBillsOptions{}, false
+	}
+	if opts.Period != "" && !periodPattern.MatchString(opts.Period) {
+		writeProblem(w, req, http.StatusBadRequest, "invalid-request", "Invalid request", "period must use YYYY-MM calendar-month format")
+		return listBillsOptions{}, false
+	}
+
+	rawLimit := values.Get("limit")
+	if rawLimit == "" {
+		opts.Limit = defaultListBillsLimit
+		return opts, true
+	}
+
+	limit, err := strconv.Atoi(rawLimit)
+	if err != nil || limit <= 0 {
+		writeProblem(w, req, http.StatusBadRequest, "invalid-request", "Invalid request", "limit must be a positive integer")
+		return listBillsOptions{}, false
+	}
+	if limit > maxListBillsLimit {
+		limit = maxListBillsLimit
+	}
+	opts.Limit = limit
+	return opts, true
 }
 
 func writeOpenTemporalError(w http.ResponseWriter, req *http.Request, err error) {
@@ -413,6 +509,15 @@ func writeCloseTemporalError(w http.ResponseWriter, req *http.Request, id string
 	writeProblem(w, req, http.StatusServiceUnavailable, "close-unavailable", "Close unavailable", "close did not complete; retry after a short delay")
 }
 
+func writeReadBillError(w http.ResponseWriter, req *http.Request, id string, err error) {
+	if errors.Is(err, sqldb.ErrNoRows) {
+		writeProblem(w, req, http.StatusNotFound, "bill-not-found", "Bill not found", "bill does not exist")
+		return
+	}
+	rlog.Error("get bill: read failed", "billID", id, "problemType", "read-unavailable", "err", err)
+	writeProblem(w, req, http.StatusServiceUnavailable, "read-unavailable", "Read unavailable", "bill could not be read; retry after a short delay")
+}
+
 func writeProblem(w http.ResponseWriter, req *http.Request, status int, problemType, title, detail string) {
 	w.Header().Set("Content-Type", "application/problem+json")
 	w.WriteHeader(status)
@@ -469,7 +574,7 @@ func currentBillID(req *http.Request) string {
 			return strings.TrimSuffix(rest, suffix)
 		}
 	}
-	return ""
+	return rest
 }
 
 func currentEncoreBillID() (billID string) {
@@ -480,97 +585,4 @@ func currentEncoreBillID() (billID string) {
 	}()
 
 	return encore.CurrentRequest().PathParams.Get("billId")
-}
-
-func readOpenedBillResource(ctx context.Context, id string) (*BillResource, error) {
-	return readBillResource(ctx, id)
-}
-
-func readBillResource(ctx context.Context, id string) (*BillResource, error) {
-	var resource BillResource
-	var totalMinor int64
-	err := db.QueryRow(ctx, `
-		SELECT b.bill_id,
-		       b.client_id,
-		       b.currency,
-		       b.period,
-		       b.status,
-		       COALESCE(SUM(li.amount_minor), 0),
-		       COUNT(li.id),
-		       b.opened_at,
-		       b.closed_at
-		  FROM bills b
-		  LEFT JOIN line_items li ON li.bill_id = b.bill_id
-		 WHERE b.bill_id = $1
-		 GROUP BY b.bill_id, b.client_id, b.currency, b.period, b.status, b.opened_at, b.closed_at`,
-		id,
-	).Scan(
-		&resource.BillID,
-		&resource.ClientID,
-		&resource.Currency,
-		&resource.Period,
-		&resource.Status,
-		&totalMinor,
-		&resource.ItemCount,
-		&resource.OpenedAt,
-		&resource.ClosedAt,
-	)
-	if err != nil {
-		return nil, err
-	}
-	resource.TotalMinorAmount = strconv.FormatInt(totalMinor, 10)
-	return &resource, nil
-}
-
-func readClosedInvoiceResource(ctx context.Context, id string) (*InvoiceResource, error) {
-	resource, err := readBillResource(ctx, id)
-	if err != nil {
-		return nil, err
-	}
-	if resource.Status != CLOSED.String() {
-		return nil, sqldb.ErrNoRows
-	}
-
-	rows, err := db.Query(ctx, `
-		SELECT reference,
-		       amount_minor,
-		       currency,
-		       fee_type,
-		       description,
-		       applied_at
-		  FROM line_items
-		 WHERE bill_id = $1
-		 ORDER BY id`,
-		id,
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	items := []LineItemResource{}
-	for rows.Next() {
-		var item LineItemResource
-		var amountMinor int64
-		if err := rows.Scan(
-			&item.Reference,
-			&amountMinor,
-			&item.Currency,
-			&item.FeeType,
-			&item.Description,
-			&item.AppliedAt,
-		); err != nil {
-			return nil, err
-		}
-		item.MinorAmount = strconv.FormatInt(amountMinor, 10)
-		items = append(items, item)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-
-	return &InvoiceResource{
-		BillResource: *resource,
-		LineItems:    items,
-	}, nil
 }

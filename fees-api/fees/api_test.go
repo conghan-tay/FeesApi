@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -15,25 +16,6 @@ import (
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/temporal"
 )
-
-func TestListBillsReturnsEmptyScaffoldResponse(t *testing.T) {
-	resp, err := (&Service{}).ListBills(context.Background())
-	if err != nil {
-		t.Fatalf("ListBills returned error: %v", err)
-	}
-	if resp == nil {
-		t.Fatal("ListBills returned nil response")
-	}
-	if len(resp.Bills) != 0 {
-		t.Fatalf("expected no bills, got %d", len(resp.Bills))
-	}
-	if resp.NextCursor != "" {
-		t.Fatalf("expected empty next cursor, got %q", resp.NextCursor)
-	}
-	if resp.HasMore {
-		t.Fatal("expected hasMore=false")
-	}
-}
 
 func TestBillResourceEncodesClosedAtNull(t *testing.T) {
 	openedAt := time.Date(2026, 7, 3, 14, 21, 0, 0, time.UTC)
@@ -70,6 +52,224 @@ func TestBillResourceEncodesClosedAtNull(t *testing.T) {
 	}
 	if body["openedAt"] != "2026-07-03T14:21:00Z" {
 		t.Fatalf("openedAt = %#v, want RFC3339 timestamp", body["openedAt"])
+	}
+}
+
+func TestGetBillReturnsComputedTotalWithoutTemporal(t *testing.T) {
+	ctx := context.Background()
+	billID := "bill-api-get-open-USD-2099-01"
+	cleanupActivityBill(t, ctx, billID)
+	seedActivityBill(t, ctx, billID, "api-get-open", "USD", "2099-01", "OPEN", nil)
+	seedAPILineItem(t, ctx, billID, "ref-get-001", 1500, "USD", "wire_transfer", "Outbound wire")
+	seedAPILineItem(t, ctx, billID, "ref-get-002", -250, "USD", "correction", "Fee correction")
+
+	resp := performGetBill(t, &Service{}, billID, "")
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200. Body: %s", resp.Code, resp.Body.String())
+	}
+	var body BillResource
+	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode bill response: %v", err)
+	}
+	if body.BillID != billID || body.Status != "OPEN" {
+		t.Fatalf("bill identity/status = %#v, want open bill %s", body, billID)
+	}
+	if body.TotalMinorAmount != "1250" || body.ItemCount != 2 {
+		t.Fatalf("total/count = %s/%d, want 1250/2", body.TotalMinorAmount, body.ItemCount)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(resp.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("decode raw bill response: %v", err)
+	}
+	if _, ok := raw["lineItems"]; ok {
+		t.Fatal("lineItems present without includeLineItems=true")
+	}
+}
+
+func TestGetBillWithLineItemsIncludesOrderedItems(t *testing.T) {
+	ctx := context.Background()
+	billID := "bill-api-get-items-USD-2099-01"
+	cleanupActivityBill(t, ctx, billID)
+	seedActivityBill(t, ctx, billID, "api-get-items", "USD", "2099-01", "OPEN", nil)
+	seedAPILineItem(t, ctx, billID, "ref-get-items-001", 300, "USD", "wire_transfer", "First")
+	seedAPILineItem(t, ctx, billID, "ref-get-items-002", 700, "USD", "monthly_account", "Second")
+
+	resp := performGetBill(t, &Service{}, billID, "true")
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200. Body: %s", resp.Code, resp.Body.String())
+	}
+	invoice := decodeInvoiceResource(t, resp)
+	if invoice.TotalMinorAmount != "1000" || invoice.ItemCount != 2 {
+		t.Fatalf("total/count = %s/%d, want 1000/2", invoice.TotalMinorAmount, invoice.ItemCount)
+	}
+	if len(invoice.LineItems) != 2 {
+		t.Fatalf("lineItems length = %d, want 2", len(invoice.LineItems))
+	}
+	if invoice.LineItems[0].Reference != "ref-get-items-001" || invoice.LineItems[1].Reference != "ref-get-items-002" {
+		t.Fatalf("line item order = %#v, want insertion order", invoice.LineItems)
+	}
+}
+
+func TestGetBillMissingAndBadIncludeLineItems(t *testing.T) {
+	ctx := context.Background()
+	billID := "bill-api-get-missing-USD-2099-01"
+	cleanupActivityBill(t, ctx, billID)
+
+	missing := performGetBill(t, &Service{}, billID, "")
+	if missing.Code != http.StatusNotFound {
+		t.Fatalf("missing status = %d, want 404. Body: %s", missing.Code, missing.Body.String())
+	}
+	assertProblem(t, missing, "bill-not-found", http.StatusNotFound)
+
+	badQuery := performGetBill(t, &Service{}, billID, "definitely")
+	if badQuery.Code != http.StatusBadRequest {
+		t.Fatalf("bad query status = %d, want 400. Body: %s", badQuery.Code, badQuery.Body.String())
+	}
+	assertProblem(t, badQuery, "invalid-request", http.StatusBadRequest)
+}
+
+func TestListBillsReturnsEmptyForUnmatchedFilter(t *testing.T) {
+	resp := performListBills(t, &Service{}, url.Values{"clientId": []string{"api-list-empty"}})
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200. Body: %s", resp.Code, resp.Body.String())
+	}
+	body := decodeListBillsResponse(t, resp)
+	if len(body.Bills) != 0 || body.NextCursor != "" || body.HasMore {
+		t.Fatalf("list response = %#v, want empty terminal page", body)
+	}
+}
+
+func TestListBillsFiltersAndComputedTotals(t *testing.T) {
+	ctx := context.Background()
+	clientID := "api-list-filter"
+	targetID := "bill-api-list-filter-USD-2099-01"
+	otherStatusID := "bill-api-list-filter-USD-2099-02"
+	otherCurrencyID := "bill-api-list-filter-GEL-2099-01"
+	closedAt := time.Date(2099, 2, 1, 0, 0, 0, 0, time.UTC)
+	for _, id := range []string{targetID, otherStatusID, otherCurrencyID} {
+		cleanupActivityBill(t, ctx, id)
+	}
+	seedActivityBill(t, ctx, targetID, clientID, "USD", "2099-01", "CLOSED", &closedAt)
+	seedActivityBill(t, ctx, otherStatusID, clientID, "USD", "2099-02", "OPEN", nil)
+	seedActivityBill(t, ctx, otherCurrencyID, clientID, "GEL", "2099-01", "CLOSED", &closedAt)
+	seedAPILineItem(t, ctx, targetID, "ref-list-filter-001", 1000, "USD", "wire_transfer", "Wire")
+	seedAPILineItem(t, ctx, targetID, "ref-list-filter-002", -125, "USD", "correction", "Credit")
+
+	resp := performListBills(t, &Service{}, url.Values{
+		"clientId": []string{clientID},
+		"status":   []string{"CLOSED"},
+		"currency": []string{"USD"},
+		"period":   []string{"2099-01"},
+		"limit":    []string{"50"},
+	})
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200. Body: %s", resp.Code, resp.Body.String())
+	}
+	body := decodeListBillsResponse(t, resp)
+	if len(body.Bills) != 1 {
+		t.Fatalf("bills length = %d, want 1: %#v", len(body.Bills), body.Bills)
+	}
+	got := body.Bills[0]
+	if got.BillID != targetID || got.TotalMinorAmount != "875" || got.ItemCount != 2 {
+		t.Fatalf("listed bill = %#v, want target total/count 875/2", got)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(resp.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("decode raw list response: %v", err)
+	}
+	firstBill := raw["bills"].([]any)[0].(map[string]any)
+	if _, ok := firstBill["lineItems"]; ok {
+		t.Fatal("list response inlined lineItems")
+	}
+}
+
+func TestListBillsCursorPaginationIsDeterministicForSameOpenedAt(t *testing.T) {
+	ctx := context.Background()
+	clientID := "api-list-page"
+	openedAt := time.Date(2099, 1, 10, 10, 0, 0, 0, time.UTC)
+	olderOpenedAt := time.Date(2099, 1, 10, 9, 59, 0, 0, time.UTC)
+	billIDs := []string{
+		"bill-api-list-page-c-USD-2099-01",
+		"bill-api-list-page-z-USD-2099-02",
+		"bill-api-list-page-b-USD-2099-03",
+		"bill-api-list-page-a-USD-2099-04",
+	}
+	for _, id := range billIDs {
+		cleanupActivityBill(t, ctx, id)
+	}
+	periods := []string{"2099-01", "2099-02", "2099-03"}
+	for i, id := range billIDs[:3] {
+		seedActivityBill(t, ctx, id, clientID, "USD", periods[i], "OPEN", nil)
+		setAPIBillOpenedAt(t, ctx, id, openedAt)
+	}
+	seedActivityBill(t, ctx, billIDs[3], clientID, "USD", "2099-04", "OPEN", nil)
+	setAPIBillOpenedAt(t, ctx, billIDs[3], olderOpenedAt)
+
+	expectedOrder := []string{
+		"bill-api-list-page-z-USD-2099-02",
+		"bill-api-list-page-c-USD-2099-01",
+		"bill-api-list-page-b-USD-2099-03",
+		"bill-api-list-page-a-USD-2099-04",
+	}
+	cursor := ""
+	for page, wantBillID := range expectedOrder {
+		values := url.Values{
+			"clientId": []string{clientID},
+			"limit":    []string{"1"},
+		}
+		if cursor != "" {
+			values.Set("cursor", cursor)
+		}
+		resp := performListBills(t, &Service{}, values)
+		if resp.Code != http.StatusOK {
+			t.Fatalf("page %d status = %d, want 200. Body: %s", page+1, resp.Code, resp.Body.String())
+		}
+		body := decodeListBillsResponse(t, resp)
+		if len(body.Bills) != 1 {
+			t.Fatalf("page %d bills length = %d, want 1: %#v", page+1, len(body.Bills), body.Bills)
+		}
+		if body.Bills[0].BillID != wantBillID {
+			t.Fatalf("page %d bill = %q, want %q", page+1, body.Bills[0].BillID, wantBillID)
+		}
+		wantHasMore := page < len(expectedOrder)-1
+		if body.HasMore != wantHasMore {
+			t.Fatalf("page %d hasMore = %v, want %v", page+1, body.HasMore, wantHasMore)
+		}
+		if wantHasMore && body.NextCursor == "" {
+			t.Fatalf("page %d nextCursor is empty, want cursor", page+1)
+		}
+		if !wantHasMore && body.NextCursor != "" {
+			t.Fatalf("page %d nextCursor = %q, want empty", page+1, body.NextCursor)
+		}
+		cursor = body.NextCursor
+	}
+}
+
+func TestListBillsValidationFailures(t *testing.T) {
+	tests := []struct {
+		name  string
+		query url.Values
+	}{
+		{name: "bad status", query: url.Values{"status": []string{"DRAINING"}}},
+		{name: "bad currency", query: url.Values{"currency": []string{"usd"}}},
+		{name: "bad period", query: url.Values{"period": []string{"2099-13"}}},
+		{name: "zero limit", query: url.Values{"limit": []string{"0"}}},
+		{name: "non integer limit", query: url.Values{"limit": []string{"many"}}},
+		{name: "bad cursor", query: url.Values{"cursor": []string{"not-a-cursor"}}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resp := performListBills(t, &Service{}, tt.query)
+			if resp.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400. Body: %s", resp.Code, resp.Body.String())
+			}
+			assertProblem(t, resp, "invalid-request", http.StatusBadRequest)
+		})
 	}
 }
 
@@ -1087,6 +1287,34 @@ func performCloseBill(t *testing.T, svc *Service, billID, body string) *httptest
 	return resp
 }
 
+func performGetBill(t *testing.T, svc *Service, billID, includeLineItems string) *httptest.ResponseRecorder {
+	t.Helper()
+
+	path := "/v1/bills/" + billID
+	if includeLineItems != "" {
+		values := url.Values{}
+		values.Set("includeLineItems", includeLineItems)
+		path += "?" + values.Encode()
+	}
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	resp := httptest.NewRecorder()
+	svc.GetBill(resp, req)
+	return resp
+}
+
+func performListBills(t *testing.T, svc *Service, values url.Values) *httptest.ResponseRecorder {
+	t.Helper()
+
+	path := "/v1/bills"
+	if len(values) > 0 {
+		path += "?" + values.Encode()
+	}
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	resp := httptest.NewRecorder()
+	svc.ListBills(resp, req)
+	return resp
+}
+
 func assertAddLineItemUpdateOptions(t *testing.T, temporalClient *openTemporalClient, billID string, want LineItem) {
 	t.Helper()
 
@@ -1161,6 +1389,16 @@ func decodeInvoiceResource(t *testing.T, resp *httptest.ResponseRecorder) Invoic
 	return body
 }
 
+func decodeListBillsResponse(t *testing.T, resp *httptest.ResponseRecorder) ListBillsResponse {
+	t.Helper()
+
+	var body ListBillsResponse
+	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode list response body: %v", err)
+	}
+	return body
+}
+
 func seedAPILineItem(t *testing.T, ctx context.Context, billID, reference string, amountMinor int64, currency, feeType, description string) {
 	t.Helper()
 
@@ -1177,6 +1415,21 @@ func seedAPILineItem(t *testing.T, ctx context.Context, billID, reference string
 	)
 	if err != nil {
 		t.Fatalf("seed line item %s/%s: %v", billID, reference, err)
+	}
+}
+
+func setAPIBillOpenedAt(t *testing.T, ctx context.Context, billID string, openedAt time.Time) {
+	t.Helper()
+
+	_, err := db.Exec(ctx, `
+		UPDATE bills
+		   SET opened_at = $2
+		 WHERE bill_id = $1`,
+		billID,
+		openedAt,
+	)
+	if err != nil {
+		t.Fatalf("set opened_at for %s: %v", billID, err)
 	}
 }
 
