@@ -471,13 +471,13 @@ func TestAddLineItemTemporalErrorMapping(t *testing.T) {
 			name:       "direct not found",
 			directErr:  serviceerror.NewNotFound("workflow not found"),
 			wantStatus: http.StatusNotFound,
-			wantType:   "no-open-bill",
+			wantType:   "no-bill",
 		},
 		{
 			name:       "handle not found",
 			handleErr:  serviceerror.NewNotFound("workflow not found"),
 			wantStatus: http.StatusNotFound,
-			wantType:   "no-open-bill",
+			wantType:   "no-bill",
 		},
 		{
 			name:       "currency mismatch",
@@ -532,6 +532,94 @@ func TestAddLineItemTemporalErrorMapping(t *testing.T) {
 	}
 }
 
+func TestAddLineItemWorkflowNotFoundLedgerFallback(t *testing.T) {
+	ctx := context.Background()
+	closedAt := time.Date(2099, 2, 1, 0, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name       string
+		directErr  error
+		handleErr  error
+		status     string
+		closedAt   *time.Time
+		wantStatus int
+		wantType   string
+	}{
+		{
+			name:       "direct missing ledger bill",
+			directErr:  serviceerror.NewNotFound("workflow not found"),
+			wantStatus: http.StatusNotFound,
+			wantType:   "no-bill",
+		},
+		{
+			name:       "handle missing ledger bill",
+			handleErr:  serviceerror.NewNotFound("workflow not found"),
+			wantStatus: http.StatusNotFound,
+			wantType:   "no-bill",
+		},
+		{
+			name:       "direct closed ledger bill",
+			directErr:  serviceerror.NewNotFound("workflow not found"),
+			status:     "CLOSED",
+			closedAt:   &closedAt,
+			wantStatus: http.StatusConflict,
+			wantType:   "bill-closed",
+		},
+		{
+			name:       "handle closed ledger bill",
+			handleErr:  serviceerror.NewNotFound("workflow not found"),
+			status:     "CLOSED",
+			closedAt:   &closedAt,
+			wantStatus: http.StatusConflict,
+			wantType:   "bill-closed",
+		},
+		{
+			name:       "direct open ledger bill",
+			directErr:  serviceerror.NewNotFound("workflow not found"),
+			status:     "OPEN",
+			wantStatus: http.StatusServiceUnavailable,
+			wantType:   "add-line-item-unavailable",
+		},
+		{
+			name:       "handle open ledger bill",
+			handleErr:  serviceerror.NewNotFound("workflow not found"),
+			status:     "OPEN",
+			wantStatus: http.StatusServiceUnavailable,
+			wantType:   "add-line-item-unavailable",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			billID := "bill-api-add-fallback-" + strings.ReplaceAll(tt.name, " ", "-") + "-USD-2099-01"
+			cleanupActivityBill(t, ctx, billID)
+			if tt.status != "" {
+				clientID := strings.TrimSuffix(strings.TrimPrefix(billID, "bill-"), "-USD-2099-01")
+				seedActivityBill(t, ctx, billID, clientID, "USD", "2099-01", tt.status, tt.closedAt)
+			}
+
+			temporalClient := &openTemporalClient{
+				workflowErr: tt.directErr,
+				workflowHandle: &openUpdateHandle{
+					err: tt.handleErr,
+				},
+			}
+			resp := performAddLineItem(t, &Service{temporalClient: temporalClient}, billID, AddLineItemRequest{
+				Reference:   "ref-fallback",
+				MinorAmount: "1500",
+				Currency:    "USD",
+				FeeType:     "wire_transfer",
+				Description: "Outbound USD wire",
+			})
+
+			if resp.Code != tt.wantStatus {
+				t.Fatalf("status = %d, want %d. Body: %s", resp.Code, tt.wantStatus, resp.Body.String())
+			}
+			assertProblem(t, resp, tt.wantType, tt.wantStatus)
+			assertProblemDoesNotContain(t, resp, "workflow not found")
+		})
+	}
+}
+
 func TestAddLineItemNilTemporalClientReturns503(t *testing.T) {
 	resp := performAddLineItem(t, &Service{}, "bill-acme-USD-2099-01", AddLineItemRequest{
 		Reference:   "ref-unavailable",
@@ -546,23 +634,296 @@ func TestAddLineItemNilTemporalClientReturns503(t *testing.T) {
 	assertProblem(t, resp, "add-line-item-unavailable", http.StatusServiceUnavailable)
 }
 
+func TestCloseBillOpenBillSignalsWorkflowAndReturnsInvoice(t *testing.T) {
+	ctx := context.Background()
+	billID := "bill-api-close-open-USD-2099-01"
+	cleanupActivityBill(t, ctx, billID)
+	seedActivityBill(t, ctx, billID, "api-close-open", "USD", "2099-01", "OPEN", nil)
+	seedAPILineItem(t, ctx, billID, "ref-close-001", 1500, "USD", "wire_transfer", "Outbound wire")
+	seedAPILineItem(t, ctx, billID, "ref-close-002", -250, "USD", "correction", "Fee correction")
+
+	temporalClient := &openTemporalClient{
+		run: &openWorkflowRun{
+			onGet: func(ctx context.Context) error {
+				_, err := db.Exec(ctx, `
+					UPDATE bills
+					   SET status = 'CLOSED',
+					       closed_at = $2
+					 WHERE bill_id = $1`,
+					billID,
+					time.Date(2099, 2, 1, 0, 0, 0, 0, time.UTC),
+				)
+				return err
+			},
+		},
+	}
+	svc := &Service{temporalClient: temporalClient}
+
+	resp := performCloseBill(t, svc, billID, `{"reason":"explicit-test-close"}`)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200. Body: %s", resp.Code, resp.Body.String())
+	}
+	assertCloseTemporalCalls(t, temporalClient, billID, CloseSignal{Reason: "explicit-test-close"})
+	invoice := decodeInvoiceResource(t, resp)
+	if invoice.BillID != billID || invoice.ClientID != "api-close-open" || invoice.Currency != "USD" || invoice.Period != "2099-01" {
+		t.Fatalf("invoice identity = %#v, want seeded bill", invoice.BillResource)
+	}
+	if invoice.Status != "CLOSED" {
+		t.Fatalf("status = %q, want CLOSED", invoice.Status)
+	}
+	if invoice.TotalMinorAmount != "1250" {
+		t.Fatalf("totalMinorAmount = %q, want 1250", invoice.TotalMinorAmount)
+	}
+	if invoice.ItemCount != 2 {
+		t.Fatalf("itemCount = %d, want 2", invoice.ItemCount)
+	}
+	if invoice.ClosedAt == nil {
+		t.Fatal("closedAt is nil, want close timestamp")
+	}
+	if len(invoice.LineItems) != 2 {
+		t.Fatalf("lineItems length = %d, want 2", len(invoice.LineItems))
+	}
+	if invoice.LineItems[0].Reference != "ref-close-001" || invoice.LineItems[0].MinorAmount != "1500" {
+		t.Fatalf("first line item = %#v, want ref-close-001 amount 1500", invoice.LineItems[0])
+	}
+	if invoice.LineItems[1].Reference != "ref-close-002" || invoice.LineItems[1].MinorAmount != "-250" {
+		t.Fatalf("second line item = %#v, want ref-close-002 amount -250", invoice.LineItems[1])
+	}
+}
+
+func TestCloseBillAlreadyClosedReturnsInvoiceWithoutTemporal(t *testing.T) {
+	ctx := context.Background()
+	billID := "bill-api-close-closed-USD-2099-01"
+	closedAt := time.Date(2099, 2, 1, 0, 0, 0, 0, time.UTC)
+	cleanupActivityBill(t, ctx, billID)
+	seedActivityBill(t, ctx, billID, "api-close-closed", "USD", "2099-01", "CLOSED", &closedAt)
+	seedAPILineItem(t, ctx, billID, "ref-reclose", 2500, "USD", "monthly_account", "Monthly fee")
+
+	temporalClient := &openTemporalClient{}
+	svc := &Service{temporalClient: temporalClient}
+
+	resp := performCloseBill(t, svc, billID, `{"reason":"already-closed"}`)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200. Body: %s", resp.Code, resp.Body.String())
+	}
+	if temporalClient.signalWorkflowCount != 0 || temporalClient.getWorkflowCount != 0 {
+		t.Fatalf("Temporal calls = signal:%d get:%d, want none", temporalClient.signalWorkflowCount, temporalClient.getWorkflowCount)
+	}
+	invoice := decodeInvoiceResource(t, resp)
+	if invoice.Status != "CLOSED" || invoice.TotalMinorAmount != "2500" || invoice.ItemCount != 1 {
+		t.Fatalf("invoice = %#v, want closed total 2500 count 1", invoice)
+	}
+	if invoice.ClosedAt == nil || !invoice.ClosedAt.Equal(closedAt) {
+		t.Fatalf("closedAt = %v, want unchanged %s", invoice.ClosedAt, closedAt.Format(time.RFC3339))
+	}
+}
+
+func TestCloseBillZeroItemClosedBillReturnsEmptyLineItems(t *testing.T) {
+	ctx := context.Background()
+	billID := "bill-api-close-zero-USD-2099-01"
+	closedAt := time.Date(2099, 2, 1, 0, 0, 0, 0, time.UTC)
+	cleanupActivityBill(t, ctx, billID)
+	seedActivityBill(t, ctx, billID, "api-close-zero", "USD", "2099-01", "CLOSED", &closedAt)
+
+	resp := performCloseBill(t, &Service{}, billID, `{}`)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200. Body: %s", resp.Code, resp.Body.String())
+	}
+	invoice := decodeInvoiceResource(t, resp)
+	if invoice.TotalMinorAmount != "0" || invoice.ItemCount != 0 {
+		t.Fatalf("total/count = %s/%d, want 0/0", invoice.TotalMinorAmount, invoice.ItemCount)
+	}
+	if invoice.LineItems == nil {
+		t.Fatal("lineItems is nil, want empty array")
+	}
+	if len(invoice.LineItems) != 0 {
+		t.Fatalf("lineItems length = %d, want 0", len(invoice.LineItems))
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(resp.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("decode raw invoice: %v", err)
+	}
+	if _, ok := raw["lineItems"]; !ok {
+		t.Fatal("expected lineItems key to be present")
+	}
+}
+
+func TestCloseBillValidationFailuresDoNotCallTemporal(t *testing.T) {
+	tests := []struct {
+		name   string
+		billID string
+		body   string
+	}{
+		{name: "missing bill ID", billID: "", body: `{}`},
+		{name: "malformed JSON", billID: "bill-acme-USD-2099-01", body: `{"reason":`},
+		{name: "unknown field", billID: "bill-acme-USD-2099-01", body: `{"reason":"close","unexpected":true}`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			temporalClient := &openTemporalClient{}
+			resp := performCloseBill(t, &Service{temporalClient: temporalClient}, tt.billID, tt.body)
+
+			if resp.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400. Body: %s", resp.Code, resp.Body.String())
+			}
+			assertProblem(t, resp, "invalid-request", http.StatusBadRequest)
+			if temporalClient.signalWorkflowCount != 0 || temporalClient.getWorkflowCount != 0 {
+				t.Fatalf("Temporal calls = signal:%d get:%d, want none", temporalClient.signalWorkflowCount, temporalClient.getWorkflowCount)
+			}
+		})
+	}
+}
+
+func TestCloseBillMissingLedgerBillReturns404(t *testing.T) {
+	ctx := context.Background()
+	billID := "bill-api-close-missing-USD-2099-01"
+	cleanupActivityBill(t, ctx, billID)
+
+	resp := performCloseBill(t, &Service{temporalClient: &openTemporalClient{}}, billID, `{}`)
+
+	if resp.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404. Body: %s", resp.Code, resp.Body.String())
+	}
+	assertProblem(t, resp, "bill-not-found", http.StatusNotFound)
+}
+
+func TestCloseBillOpenBillWithNilTemporalClientReturns503(t *testing.T) {
+	ctx := context.Background()
+	billID := "bill-api-close-nil-temporal-USD-2099-01"
+	cleanupActivityBill(t, ctx, billID)
+	seedActivityBill(t, ctx, billID, "api-close-nil-temporal", "USD", "2099-01", "OPEN", nil)
+
+	resp := performCloseBill(t, &Service{}, billID, `{}`)
+
+	if resp.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503. Body: %s", resp.Code, resp.Body.String())
+	}
+	assertProblem(t, resp, "close-unavailable", http.StatusServiceUnavailable)
+}
+
+func TestCloseBillTemporalNotFoundWithClosedLedgerFallbackReturns200(t *testing.T) {
+	ctx := context.Background()
+	billID := "bill-api-close-not-found-closed-USD-2099-01"
+	closedAt := time.Date(2099, 2, 1, 0, 0, 0, 0, time.UTC)
+	cleanupActivityBill(t, ctx, billID)
+	seedActivityBill(t, ctx, billID, "api-close-not-found-closed", "USD", "2099-01", "OPEN", nil)
+
+	temporalClient := &openTemporalClient{
+		signalErr: serviceerror.NewNotFound("workflow not found"),
+		beforeSignalErr: func(ctx context.Context) error {
+			_, err := db.Exec(ctx, `
+				UPDATE bills
+				   SET status = 'CLOSED',
+				       closed_at = $2
+				 WHERE bill_id = $1`,
+				billID,
+				closedAt,
+			)
+			return err
+		},
+	}
+
+	resp := performCloseBill(t, &Service{temporalClient: temporalClient}, billID, `{}`)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200. Body: %s", resp.Code, resp.Body.String())
+	}
+	invoice := decodeInvoiceResource(t, resp)
+	if invoice.Status != "CLOSED" {
+		t.Fatalf("status = %q, want CLOSED", invoice.Status)
+	}
+}
+
+func TestCloseBillTemporalNotFoundWithOpenLedgerReturns503(t *testing.T) {
+	ctx := context.Background()
+	billID := "bill-api-close-not-found-open-USD-2099-01"
+	cleanupActivityBill(t, ctx, billID)
+	seedActivityBill(t, ctx, billID, "api-close-not-found-open", "USD", "2099-01", "OPEN", nil)
+
+	temporalClient := &openTemporalClient{
+		signalErr: serviceerror.NewNotFound("workflow not found"),
+	}
+
+	resp := performCloseBill(t, &Service{temporalClient: temporalClient}, billID, `{}`)
+
+	if resp.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503. Body: %s", resp.Code, resp.Body.String())
+	}
+	assertProblem(t, resp, "close-unavailable", http.StatusServiceUnavailable)
+}
+
+func TestCloseBillGenericTemporalErrorsReturnRedacted503(t *testing.T) {
+	ctx := context.Background()
+	billID := "bill-api-close-generic-USD-2099-01"
+	cleanupActivityBill(t, ctx, billID)
+	seedActivityBill(t, ctx, billID, "api-close-generic", "USD", "2099-01", "OPEN", nil)
+
+	rawErr := "dial tcp 10.0.4.23:7233: connect: connection refused"
+	temporalClient := &openTemporalClient{
+		signalErr: errors.New(rawErr),
+	}
+
+	resp := performCloseBill(t, &Service{temporalClient: temporalClient}, billID, `{}`)
+
+	if resp.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503. Body: %s", resp.Code, resp.Body.String())
+	}
+	assertProblem(t, resp, "close-unavailable", http.StatusServiceUnavailable)
+	assertProblemDoesNotContain(t, resp, rawErr)
+}
+
+func TestCloseBillWorkflowGetErrorReturnsRedacted503(t *testing.T) {
+	ctx := context.Background()
+	billID := "bill-api-close-get-error-USD-2099-01"
+	cleanupActivityBill(t, ctx, billID)
+	seedActivityBill(t, ctx, billID, "api-close-get-error", "USD", "2099-01", "OPEN", nil)
+
+	rawErr := "persist invoice failed: host=10.0.4.23"
+	temporalClient := &openTemporalClient{
+		run: &openWorkflowRun{err: errors.New(rawErr)},
+	}
+
+	resp := performCloseBill(t, &Service{temporalClient: temporalClient}, billID, `{}`)
+
+	if resp.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503. Body: %s", resp.Code, resp.Body.String())
+	}
+	assertProblem(t, resp, "close-unavailable", http.StatusServiceUnavailable)
+	assertProblemDoesNotContain(t, resp, rawErr)
+}
+
 type openTemporalClient struct {
 	closeCount int
 
 	newStartCount        int
 	updateWithStartCount int
 	updateWorkflowCount  int
+	signalWorkflowCount  int
+	getWorkflowCount     int
 
 	startOptions          client.StartWorkflowOptions
 	startWorkflow         interface{}
 	startArgs             []interface{}
 	updateOptions         client.UpdateWorkflowOptions
 	workflowUpdateOptions client.UpdateWorkflowOptions
+	signalWorkflowID      string
+	signalRunID           string
+	signalName            string
+	signalArg             interface{}
+	getWorkflowID         string
+	getRunID              string
 
-	handle         client.WorkflowUpdateHandle
-	updateErr      error
-	workflowHandle client.WorkflowUpdateHandle
-	workflowErr    error
+	handle          client.WorkflowUpdateHandle
+	updateErr       error
+	workflowHandle  client.WorkflowUpdateHandle
+	workflowErr     error
+	run             client.WorkflowRun
+	signalErr       error
+	beforeSignalErr func(context.Context) error
 }
 
 func (c *openTemporalClient) Close() {
@@ -601,10 +962,60 @@ func (c *openTemporalClient) UpdateWorkflow(_ context.Context, options client.Up
 	return &openUpdateHandle{}, nil
 }
 
+func (c *openTemporalClient) SignalWorkflow(ctx context.Context, workflowID string, runID string, signalName string, arg interface{}) error {
+	c.signalWorkflowCount++
+	c.signalWorkflowID = workflowID
+	c.signalRunID = runID
+	c.signalName = signalName
+	c.signalArg = arg
+	if c.beforeSignalErr != nil {
+		if err := c.beforeSignalErr(ctx); err != nil {
+			return err
+		}
+	}
+	return c.signalErr
+}
+
+func (c *openTemporalClient) GetWorkflow(_ context.Context, workflowID string, runID string) client.WorkflowRun {
+	c.getWorkflowCount++
+	c.getWorkflowID = workflowID
+	c.getRunID = runID
+	if c.run != nil {
+		return c.run
+	}
+	return &openWorkflowRun{}
+}
+
 type openWithStartWorkflowOperation struct{}
 
 func (openWithStartWorkflowOperation) Get(context.Context) (client.WorkflowRun, error) {
 	return nil, nil
+}
+
+type openWorkflowRun struct {
+	err   error
+	onGet func(context.Context) error
+}
+
+func (r *openWorkflowRun) Get(ctx context.Context, _ interface{}) error {
+	if r.onGet != nil {
+		if err := r.onGet(ctx); err != nil {
+			return err
+		}
+	}
+	return r.err
+}
+
+func (r *openWorkflowRun) GetID() string {
+	return ""
+}
+
+func (r *openWorkflowRun) GetRunID() string {
+	return ""
+}
+
+func (r *openWorkflowRun) GetWithOptions(ctx context.Context, valuePtr interface{}, _ client.WorkflowRunGetOptions) error {
+	return r.Get(ctx, valuePtr)
 }
 
 type openUpdateHandle struct {
@@ -665,6 +1076,17 @@ func performAddLineItemRaw(t *testing.T, svc *Service, billID, body string) *htt
 	return resp
 }
 
+func performCloseBill(t *testing.T, svc *Service, billID, body string) *httptest.ResponseRecorder {
+	t.Helper()
+
+	path := "/v1/bills/" + billID + "/close"
+	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	svc.CloseBill(resp, req)
+	return resp
+}
+
 func assertAddLineItemUpdateOptions(t *testing.T, temporalClient *openTemporalClient, billID string, want LineItem) {
 	t.Helper()
 
@@ -693,6 +1115,68 @@ func assertAddLineItemUpdateOptions(t *testing.T, temporalClient *openTemporalCl
 	}
 	if got != want {
 		t.Fatalf("LineItem arg = %#v, want %#v", got, want)
+	}
+}
+
+func assertCloseTemporalCalls(t *testing.T, temporalClient *openTemporalClient, billID string, wantSignal CloseSignal) {
+	t.Helper()
+
+	if temporalClient.signalWorkflowCount != 1 {
+		t.Fatalf("SignalWorkflow calls = %d, want 1", temporalClient.signalWorkflowCount)
+	}
+	if temporalClient.signalWorkflowID != billID {
+		t.Fatalf("signal workflow ID = %q, want %q", temporalClient.signalWorkflowID, billID)
+	}
+	if temporalClient.signalRunID != "" {
+		t.Fatalf("signal run ID = %q, want empty", temporalClient.signalRunID)
+	}
+	if temporalClient.signalName != SignalCloseBill {
+		t.Fatalf("signal name = %q, want %q", temporalClient.signalName, SignalCloseBill)
+	}
+	gotSignal, ok := temporalClient.signalArg.(CloseSignal)
+	if !ok {
+		t.Fatalf("signal arg = %T, want CloseSignal", temporalClient.signalArg)
+	}
+	if gotSignal != wantSignal {
+		t.Fatalf("signal arg = %#v, want %#v", gotSignal, wantSignal)
+	}
+	if temporalClient.getWorkflowCount != 1 {
+		t.Fatalf("GetWorkflow calls = %d, want 1", temporalClient.getWorkflowCount)
+	}
+	if temporalClient.getWorkflowID != billID {
+		t.Fatalf("get workflow ID = %q, want %q", temporalClient.getWorkflowID, billID)
+	}
+	if temporalClient.getRunID != "" {
+		t.Fatalf("get run ID = %q, want empty", temporalClient.getRunID)
+	}
+}
+
+func decodeInvoiceResource(t *testing.T, resp *httptest.ResponseRecorder) InvoiceResource {
+	t.Helper()
+
+	var body InvoiceResource
+	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode invoice response body: %v", err)
+	}
+	return body
+}
+
+func seedAPILineItem(t *testing.T, ctx context.Context, billID, reference string, amountMinor int64, currency, feeType, description string) {
+	t.Helper()
+
+	_, err := db.Exec(ctx, `
+		INSERT INTO line_items
+			(bill_id, reference, amount_minor, currency, fee_type, description)
+		VALUES ($1, $2, $3, $4, $5, $6)`,
+		billID,
+		reference,
+		amountMinor,
+		currency,
+		feeType,
+		description,
+	)
+	if err != nil {
+		t.Fatalf("seed line item %s/%s: %v", billID, reference, err)
 	}
 }
 

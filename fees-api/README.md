@@ -30,8 +30,13 @@ record and all queryable invoice facts.
 - Step #8 complete: `POST /v1/bills/{billId}/line-items` calls the
   `addLineItem` Workflow Update, returning `201` for fresh items, `200` for
   duplicate references, `400` for currency mismatch, `409` for closed bills, and
-  `404` when no open bill workflow exists.
-- Steps #9-#12 upcoming: close endpoint, ledger reads, auto-close edge cases, and
+  `404` when no bill exists.
+- Step #9 complete: `POST /v1/bills/{billId}/close` signals the bill workflow,
+  waits for the seal, then returns the ledger invoice with computed total and
+  itemized line items. Re-closing a sealed bill returns the existing invoice
+  directly from the ledger, so it also works after the workflow is no longer
+  signalable.
+- Steps #10-#12 upcoming: GET/LIST ledger reads, auto-close edge cases, and
   final docs.
 
 ## Local Smoke
@@ -92,6 +97,10 @@ turns green incrementally:
 - add after close returns `409`
 - re-close returns the same sealed invoice facts
 - GET and LIST expose the computed ledger total
+
+After Step #9, close, re-close, and add-after-close behavior is implemented and
+covered by unit/integration tests. The monolithic E2E test still depends on Step
+#10 because it includes `GET /v1/bills/{billId}` and LIST assertions.
 
 ## Configuration Notes
 
