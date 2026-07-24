@@ -102,6 +102,16 @@ func (s *Service) OpenBill(w http.ResponseWriter, req *http.Request) {
 		writeProblem(w, req, http.StatusBadRequest, "invalid-request", "Invalid request", validationErr)
 		return
 	}
+	supported, err := isSupportedCurrency(req.Context(), billInput.Currency)
+	if err != nil {
+		rlog.Error("open bill: supported currency lookup failed", "currency", billInput.Currency, "problemType", "open-unavailable", "err", err)
+		writeProblem(w, req, http.StatusServiceUnavailable, "open-unavailable", "Open unavailable", "open workflow did not complete; retry after a short delay")
+		return
+	}
+	if !supported {
+		writeProblem(w, req, http.StatusBadRequest, "unsupported-currency", "Unsupported currency", "currency is not supported")
+		return
+	}
 	if !time.Now().UTC().Before(resolvePeriodEnd(billInput.Period)) {
 		writeProblem(w, req, http.StatusUnprocessableEntity, "period-elapsed", "Period elapsed", "billing period has already elapsed")
 		return

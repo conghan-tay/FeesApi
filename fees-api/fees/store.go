@@ -43,6 +43,22 @@ func readOpenedBillResource(ctx context.Context, id string) (*BillResource, erro
 	return readBillResource(ctx, id)
 }
 
+func isSupportedCurrency(ctx context.Context, code string) (bool, error) {
+	var supported bool
+	err := db.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			  FROM currencies
+			 WHERE code = $1
+		)`,
+		code,
+	).Scan(&supported)
+	if err != nil {
+		return false, err
+	}
+	return supported, nil
+}
+
 func readBillResource(ctx context.Context, id string) (*BillResource, error) {
 	return readBillResourceFrom(ctx, db, id)
 }

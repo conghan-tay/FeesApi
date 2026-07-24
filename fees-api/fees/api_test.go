@@ -460,6 +460,28 @@ func TestOpenBillValidationFailuresDoNotCallTemporal(t *testing.T) {
 	}
 }
 
+func TestOpenBillUnsupportedCurrencyReturns400AndDoesNotCallTemporal(t *testing.T) {
+	temporalClient := &openTemporalClient{}
+	svc := &Service{
+		temporalClient: temporalClient,
+		temporalConfig: defaultTemporalConfig(),
+	}
+
+	resp := performOpenBill(t, svc, OpenBillRequest{
+		ClientID: "api-unsupported-currency",
+		Currency: "EUR",
+		Period:   "2099-01",
+	})
+
+	if resp.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400. Body: %s", resp.Code, resp.Body.String())
+	}
+	assertProblem(t, resp, "unsupported-currency", http.StatusBadRequest)
+	if temporalClient.newStartCount != 0 || temporalClient.updateWithStartCount != 0 {
+		t.Fatalf("Temporal was called for unsupported currency: new=%d update=%d", temporalClient.newStartCount, temporalClient.updateWithStartCount)
+	}
+}
+
 func TestOpenBillElapsedPeriodReturns422AndDoesNotCallTemporal(t *testing.T) {
 	temporalClient := &openTemporalClient{}
 	svc := &Service{
