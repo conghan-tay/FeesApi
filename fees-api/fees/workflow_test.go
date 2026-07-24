@@ -420,6 +420,54 @@ func TestBillWorkflowAutoCloseTimerSealsBill(t *testing.T) {
 	env.AssertExpectations(t)
 }
 
+func TestBillWorkflowAutoCloseAtPeriodEndSealsImmediately(t *testing.T) {
+	env := newBillWorkflowTestEnv()
+	in := testBillInput()
+	env.SetStartTime(resolvePeriodEnd(in.Period))
+
+	expectPersistBill(env, in)
+	env.OnActivity(ActivityPersistInvoice, mock.Anything, billID(in.ClientID, in.Currency, in.Period)).
+		Return(testClosedBillView(in), nil).
+		Once()
+
+	env.ExecuteWorkflow(BillWorkflow, in)
+	assertBillWorkflowCompleted(t, env)
+	env.AssertExpectations(t)
+}
+
+func TestBillWorkflowAutoCloseRejectsStragglerDuringSeal(t *testing.T) {
+	env := newBillWorkflowTestEnv()
+	in := testBillInput()
+	env.SetStartTime(time.Date(2099, 1, 31, 23, 59, 0, 0, time.UTC))
+
+	expectPersistBill(env, in)
+	env.OnActivity(ActivityPersistInvoice, mock.Anything, billID(in.ClientID, in.Currency, in.Period)).
+		After(time.Hour).
+		Return(testClosedBillView(in), nil).
+		Once()
+
+	var rejected bool
+	env.RegisterDelayedCallback(func() {
+		env.UpdateWorkflow(UpdateAddLineItem, "update-auto-close-straggler", &testsuite.TestUpdateCallback{
+			OnReject: func(err error) {
+				assertApplicationErrorType(t, err, "BillNotOpen")
+				rejected = true
+			},
+			OnAccept: func() {
+				t.Error("auto-close straggler update was accepted, want validator reject")
+			},
+		}, testLineItem("ref-auto-close-straggler", "USD"))
+	}, 2*time.Minute)
+
+	env.ExecuteWorkflow(BillWorkflow, in)
+	assertBillWorkflowCompleted(t, env)
+	if !rejected {
+		t.Fatal("auto-close straggler update was not rejected")
+	}
+	env.AssertExpectations(t)
+	env.AssertNumberOfCalls(t, ActivityPersistLineItem, 0)
+}
+
 func TestBillWorkflowDrainsInFlightUpdateBeforeSeal(t *testing.T) {
 	env := newBillWorkflowTestEnv()
 	in := testBillInput()
