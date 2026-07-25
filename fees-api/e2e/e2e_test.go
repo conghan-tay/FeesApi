@@ -268,8 +268,8 @@ func requireStatus[T any](t *testing.T, resp *Response[T], want int) {
 
 	detail := strings.TrimSpace(string(resp.RawBody))
 	if resp.Problem != nil {
-		detail = fmt.Sprintf("problem type=%q title=%q status=%d detail=%q",
-			resp.Problem.Type, resp.Problem.Title, resp.Problem.Status, resp.Problem.Detail)
+		detail = fmt.Sprintf("error code=%q type=%q message=%q",
+			resp.Problem.Code, resp.Problem.Details.Type, resp.Problem.Message)
 	}
 	t.Fatalf("status = %d, want %d. %s", resp.StatusCode, want, detail)
 }
