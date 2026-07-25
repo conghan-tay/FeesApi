@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"encore.dev/beta/errs"
+	"encore.dev/types/option"
 	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/api/serviceerror"
 	"go.temporal.io/sdk/client"
@@ -428,12 +430,11 @@ func TestOpenBillSuccessStartsWorkflowAndReturnsCreatedResource(t *testing.T) {
 func TestOpenBillValidationFailuresDoNotCallTemporal(t *testing.T) {
 	tests := []struct {
 		name string
-		body string
+		body OpenBillRequest
 	}{
-		{name: "malformed JSON", body: `{"clientId":`},
-		{name: "missing client", body: `{"currency":"USD","period":"2099-01"}`},
-		{name: "bad currency", body: `{"clientId":"acme","currency":"usd","period":"2099-01"}`},
-		{name: "bad period", body: `{"clientId":"acme","currency":"USD","period":"2099-13"}`},
+		{name: "missing client", body: OpenBillRequest{Currency: "USD", Period: "2099-01"}},
+		{name: "bad currency", body: OpenBillRequest{ClientID: "acme", Currency: "usd", Period: "2099-01"}},
+		{name: "bad period", body: OpenBillRequest{ClientID: "acme", Currency: "USD", Period: "2099-13"}},
 	}
 
 	for _, tt := range tests {
@@ -444,10 +445,7 @@ func TestOpenBillValidationFailuresDoNotCallTemporal(t *testing.T) {
 				temporalConfig: defaultTemporalConfig(),
 			}
 
-			req := httptest.NewRequest(http.MethodPost, "/v1/bills", strings.NewReader(tt.body))
-			req.Header.Set("Content-Type", "application/json")
-			resp := httptest.NewRecorder()
-			svc.OpenBill(resp, req)
+			resp := performOpenBill(t, svc, tt.body)
 
 			if resp.Code != http.StatusBadRequest {
 				t.Fatalf("status = %d, want 400. Body: %s", resp.Code, resp.Body.String())
@@ -482,7 +480,7 @@ func TestOpenBillUnsupportedCurrencyReturns400AndDoesNotCallTemporal(t *testing.
 	}
 }
 
-func TestOpenBillElapsedPeriodReturns422AndDoesNotCallTemporal(t *testing.T) {
+func TestOpenBillElapsedPeriodReturns400AndDoesNotCallTemporal(t *testing.T) {
 	temporalClient := &openTemporalClient{}
 	svc := &Service{
 		temporalClient: temporalClient,
@@ -495,10 +493,10 @@ func TestOpenBillElapsedPeriodReturns422AndDoesNotCallTemporal(t *testing.T) {
 		Period:   "2000-01",
 	})
 
-	if resp.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("status = %d, want 422. Body: %s", resp.Code, resp.Body.String())
+	if resp.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400. Body: %s", resp.Code, resp.Body.String())
 	}
-	assertProblem(t, resp, "period-elapsed", http.StatusUnprocessableEntity)
+	assertProblem(t, resp, "period-elapsed", http.StatusBadRequest)
 	if temporalClient.newStartCount != 0 || temporalClient.updateWithStartCount != 0 {
 		t.Fatalf("Temporal was called for elapsed period: new=%d update=%d", temporalClient.newStartCount, temporalClient.updateWithStartCount)
 	}
@@ -718,17 +716,15 @@ func TestAddLineItemValidationFailuresDoNotCallTemporal(t *testing.T) {
 	tests := []struct {
 		name   string
 		billID string
-		body   string
+		body   AddLineItemRequest
 	}{
-		{name: "missing bill ID", billID: "", body: `{"reference":"ref","minorAmount":"1","currency":"USD","feeType":"wire"}`},
-		{name: "malformed JSON", billID: "bill-acme-USD-2099-01", body: `{"reference":`},
-		{name: "unknown field", billID: "bill-acme-USD-2099-01", body: `{"reference":"ref","minorAmount":"1","currency":"USD","feeType":"wire","unexpected":true}`},
-		{name: "missing reference", billID: "bill-acme-USD-2099-01", body: `{"minorAmount":"1","currency":"USD","feeType":"wire"}`},
-		{name: "missing minor amount", billID: "bill-acme-USD-2099-01", body: `{"reference":"ref","currency":"USD","feeType":"wire"}`},
-		{name: "invalid minor amount", billID: "bill-acme-USD-2099-01", body: `{"reference":"ref","minorAmount":"1.25","currency":"USD","feeType":"wire"}`},
-		{name: "overflow minor amount", billID: "bill-acme-USD-2099-01", body: `{"reference":"ref","minorAmount":"9223372036854775808","currency":"USD","feeType":"wire"}`},
-		{name: "lowercase currency", billID: "bill-acme-USD-2099-01", body: `{"reference":"ref","minorAmount":"1","currency":"usd","feeType":"wire"}`},
-		{name: "missing fee type", billID: "bill-acme-USD-2099-01", body: `{"reference":"ref","minorAmount":"1","currency":"USD"}`},
+		{name: "missing bill ID", billID: "", body: AddLineItemRequest{Reference: "ref", MinorAmount: "1", Currency: "USD", FeeType: "wire"}},
+		{name: "missing reference", billID: "bill-acme-USD-2099-01", body: AddLineItemRequest{MinorAmount: "1", Currency: "USD", FeeType: "wire"}},
+		{name: "missing minor amount", billID: "bill-acme-USD-2099-01", body: AddLineItemRequest{Reference: "ref", Currency: "USD", FeeType: "wire"}},
+		{name: "invalid minor amount", billID: "bill-acme-USD-2099-01", body: AddLineItemRequest{Reference: "ref", MinorAmount: "1.25", Currency: "USD", FeeType: "wire"}},
+		{name: "overflow minor amount", billID: "bill-acme-USD-2099-01", body: AddLineItemRequest{Reference: "ref", MinorAmount: "9223372036854775808", Currency: "USD", FeeType: "wire"}},
+		{name: "lowercase currency", billID: "bill-acme-USD-2099-01", body: AddLineItemRequest{Reference: "ref", MinorAmount: "1", Currency: "usd", FeeType: "wire"}},
+		{name: "missing fee type", billID: "bill-acme-USD-2099-01", body: AddLineItemRequest{Reference: "ref", MinorAmount: "1", Currency: "USD"}},
 	}
 
 	for _, tt := range tests {
@@ -736,7 +732,7 @@ func TestAddLineItemValidationFailuresDoNotCallTemporal(t *testing.T) {
 			temporalClient := &openTemporalClient{}
 			svc := &Service{temporalClient: temporalClient}
 
-			resp := performAddLineItemRaw(t, svc, tt.billID, tt.body)
+			resp := performAddLineItem(t, svc, tt.billID, tt.body)
 
 			if resp.Code != http.StatusBadRequest {
 				t.Fatalf("status = %d, want 400. Body: %s", resp.Code, resp.Body.String())
@@ -957,7 +953,7 @@ func TestCloseBillOpenBillSignalsWorkflowAndReturnsInvoice(t *testing.T) {
 	assertCloseTemporalCalls(t, temporalClient, billID, CloseSignal{Reason: "explicit-test-close"})
 	invoice := decodeInvoiceResource(t, resp)
 	if invoice.BillID != billID || invoice.ClientID != "api-close-open" || invoice.Currency != "USD" || invoice.Period != "2099-01" {
-		t.Fatalf("invoice identity = %#v, want seeded bill", invoice.BillResource)
+		t.Fatalf("invoice identity = %#v, want seeded bill", invoice)
 	}
 	if invoice.Status != "CLOSED" {
 		t.Fatalf("status = %q, want CLOSED", invoice.Status)
@@ -1048,8 +1044,6 @@ func TestCloseBillValidationFailuresDoNotCallTemporal(t *testing.T) {
 		body   string
 	}{
 		{name: "missing bill ID", billID: "", body: `{}`},
-		{name: "malformed JSON", billID: "bill-acme-USD-2099-01", body: `{"reason":`},
-		{name: "unknown field", billID: "bill-acme-USD-2099-01", body: `{"reason":"close","unexpected":true}`},
 	}
 
 	for _, tt := range tests {
@@ -1334,75 +1328,137 @@ func (h *openUpdateHandle) Get(_ context.Context, valuePtr interface{}) error {
 func performOpenBill(t *testing.T, svc *Service, body OpenBillRequest) *httptest.ResponseRecorder {
 	t.Helper()
 
-	payload, err := json.Marshal(body)
-	if err != nil {
-		t.Fatalf("marshal request: %v", err)
-	}
-	req := httptest.NewRequest(http.MethodPost, "/v1/bills", strings.NewReader(string(payload)))
-	req.Header.Set("Content-Type", "application/json")
 	resp := httptest.NewRecorder()
-	svc.OpenBill(resp, req)
+	out, err := svc.OpenBill(context.Background(), &body)
+	if err != nil {
+		errs.HTTPError(resp, err)
+		return resp
+	}
+	resp.Header().Set("Location", out.Location)
+	writeTestJSON(t, resp, out.HTTPStatus, struct {
+		BillID           string     `json:"billId"`
+		ClientID         string     `json:"clientId"`
+		Currency         string     `json:"currency"`
+		Period           string     `json:"period"`
+		Status           string     `json:"status"`
+		TotalMinorAmount string     `json:"totalMinorAmount"`
+		ItemCount        int        `json:"itemCount"`
+		OpenedAt         time.Time  `json:"openedAt"`
+		ClosedAt         *time.Time `json:"closedAt"`
+	}{
+		BillID:           out.BillID,
+		ClientID:         out.ClientID,
+		Currency:         out.Currency,
+		Period:           out.Period,
+		Status:           out.Status,
+		TotalMinorAmount: out.TotalMinorAmount,
+		ItemCount:        out.ItemCount,
+		OpenedAt:         out.OpenedAt,
+		ClosedAt:         out.ClosedAt,
+	})
 	return resp
 }
 
 func performAddLineItem(t *testing.T, svc *Service, billID string, body AddLineItemRequest) *httptest.ResponseRecorder {
 	t.Helper()
 
-	payload, err := json.Marshal(body)
-	if err != nil {
-		t.Fatalf("marshal request: %v", err)
-	}
-	return performAddLineItemRaw(t, svc, billID, string(payload))
-}
-
-func performAddLineItemRaw(t *testing.T, svc *Service, billID, body string) *httptest.ResponseRecorder {
-	t.Helper()
-
-	path := "/v1/bills/" + billID + "/line-items"
-	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
 	resp := httptest.NewRecorder()
-	svc.AddLineItem(resp, req)
+	out, err := svc.AddLineItem(context.Background(), billID, &body)
+	if err != nil {
+		errs.HTTPError(resp, err)
+		return resp
+	}
+	writeTestJSON(t, resp, out.HTTPStatus, struct {
+		Reference string `json:"reference"`
+		Applied   bool   `json:"applied"`
+	}{
+		Reference: out.Reference,
+		Applied:   out.Applied,
+	})
 	return resp
 }
 
 func performCloseBill(t *testing.T, svc *Service, billID, body string) *httptest.ResponseRecorder {
 	t.Helper()
 
-	path := "/v1/bills/" + billID + "/close"
-	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
+	var input CloseBillRequest
+	if body != "" {
+		if err := json.Unmarshal([]byte(body), &input); err != nil {
+			resp := httptest.NewRecorder()
+			errs.HTTPError(resp, apiError(errs.InvalidArgument, "invalid-request", "request body must be valid JSON"))
+			return resp
+		}
+	}
 	resp := httptest.NewRecorder()
-	svc.CloseBill(resp, req)
+	out, err := svc.CloseBill(context.Background(), billID, &input)
+	if err != nil {
+		errs.HTTPError(resp, err)
+		return resp
+	}
+	writeTestJSON(t, resp, http.StatusOK, out)
 	return resp
 }
 
 func performGetBill(t *testing.T, svc *Service, billID, includeLineItems string) *httptest.ResponseRecorder {
 	t.Helper()
 
-	path := "/v1/bills/" + billID
+	include := false
 	if includeLineItems != "" {
-		values := url.Values{}
-		values.Set("includeLineItems", includeLineItems)
-		path += "?" + values.Encode()
+		parsed, err := strconv.ParseBool(includeLineItems)
+		if err != nil {
+			resp := httptest.NewRecorder()
+			errs.HTTPError(resp, apiError(errs.InvalidArgument, "invalid-request", "includeLineItems must be a boolean"))
+			return resp
+		}
+		include = parsed
 	}
-	req := httptest.NewRequest(http.MethodGet, path, nil)
 	resp := httptest.NewRecorder()
-	svc.GetBill(resp, req)
+	out, err := svc.GetBill(context.Background(), billID, &GetBillRequest{IncludeLineItems: include})
+	if err != nil {
+		errs.HTTPError(resp, err)
+		return resp
+	}
+	writeTestJSON(t, resp, http.StatusOK, out)
 	return resp
 }
 
 func performListBills(t *testing.T, svc *Service, values url.Values) *httptest.ResponseRecorder {
 	t.Helper()
 
-	path := "/v1/bills"
-	if len(values) > 0 {
-		path += "?" + values.Encode()
+	req := &ListBillsRequest{
+		ClientID: values.Get("clientId"),
+		Status:   values.Get("status"),
+		Currency: values.Get("currency"),
+		Period:   values.Get("period"),
+		Cursor:   values.Get("cursor"),
 	}
-	req := httptest.NewRequest(http.MethodGet, path, nil)
+	if rawLimit := values.Get("limit"); rawLimit != "" {
+		limit, err := strconv.Atoi(rawLimit)
+		if err != nil {
+			resp := httptest.NewRecorder()
+			errs.HTTPError(resp, apiError(errs.InvalidArgument, "invalid-request", "limit must be an integer"))
+			return resp
+		}
+		req.Limit = option.Some(limit)
+	}
 	resp := httptest.NewRecorder()
-	svc.ListBills(resp, req)
+	out, err := svc.ListBills(context.Background(), req)
+	if err != nil {
+		errs.HTTPError(resp, err)
+		return resp
+	}
+	writeTestJSON(t, resp, http.StatusOK, out)
 	return resp
+}
+
+func writeTestJSON(t *testing.T, resp *httptest.ResponseRecorder, status int, body interface{}) {
+	t.Helper()
+
+	resp.Header().Set("Content-Type", "application/json")
+	resp.WriteHeader(status)
+	if err := json.NewEncoder(resp).Encode(body); err != nil {
+		t.Fatalf("encode response: %v", err)
+	}
 }
 
 func assertAddLineItemUpdateOptions(t *testing.T, temporalClient *openTemporalClient, billID string, want LineItem) {
@@ -1526,27 +1582,33 @@ func setAPIBillOpenedAt(t *testing.T, ctx context.Context, billID string, opened
 func assertProblem(t *testing.T, resp *httptest.ResponseRecorder, wantType string, wantStatus int) {
 	t.Helper()
 
-	var problem problemResponse
-	if err := json.Unmarshal(resp.Body.Bytes(), &problem); err != nil {
-		t.Fatalf("decode problem response: %v", err)
+	var body struct {
+		Code    string          `json:"code"`
+		Message string          `json:"message"`
+		Details APIErrorDetails `json:"details"`
 	}
-	if problem.Type != wantType {
-		t.Fatalf("problem type = %q, want %q", problem.Type, wantType)
+	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode Encore error response: %v", err)
 	}
-	if problem.Status != wantStatus {
-		t.Fatalf("problem status = %d, want %d", problem.Status, wantStatus)
+	if body.Details.Type != wantType {
+		t.Fatalf("error details type = %q, want %q. Body: %s", body.Details.Type, wantType, resp.Body.String())
+	}
+	if resp.Code != wantStatus {
+		t.Fatalf("error status = %d, want %d. Body: %s", resp.Code, wantStatus, resp.Body.String())
 	}
 }
 
 func assertProblemDetail(t *testing.T, resp *httptest.ResponseRecorder, wantDetail string) {
 	t.Helper()
 
-	var problem problemResponse
-	if err := json.Unmarshal(resp.Body.Bytes(), &problem); err != nil {
-		t.Fatalf("decode problem response: %v", err)
+	var body struct {
+		Message string `json:"message"`
 	}
-	if problem.Detail != wantDetail {
-		t.Fatalf("problem detail = %q, want %q", problem.Detail, wantDetail)
+	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode Encore error response: %v", err)
+	}
+	if body.Message != wantDetail {
+		t.Fatalf("error message = %q, want %q", body.Message, wantDetail)
 	}
 }
 

@@ -1,18 +1,17 @@
 package fees
 
 import (
-	"encoding/json"
+	"context"
 	"errors"
-	"io"
 	"net/http"
 	"regexp"
 	"strconv"
-	"strings"
 	"time"
 
-	"encore.dev"
+	"encore.dev/beta/errs"
 	"encore.dev/rlog"
 	"encore.dev/storage/sqldb"
+	"encore.dev/types/option"
 	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/api/serviceerror"
 	"go.temporal.io/sdk/client"
@@ -37,8 +36,29 @@ type BillResource struct {
 }
 
 type InvoiceResource struct {
-	BillResource
-	LineItems []LineItemResource `json:"lineItems"`
+	BillID           string             `json:"billId"`
+	ClientID         string             `json:"clientId"`
+	Currency         string             `json:"currency"`
+	Period           string             `json:"period"`
+	Status           string             `json:"status"`
+	TotalMinorAmount string             `json:"totalMinorAmount"`
+	ItemCount        int                `json:"itemCount"`
+	OpenedAt         time.Time          `json:"openedAt"`
+	ClosedAt         *time.Time         `json:"closedAt"`
+	LineItems        []LineItemResource `json:"lineItems"`
+}
+
+type GetBillResponse struct {
+	BillID           string             `json:"billId"`
+	ClientID         string             `json:"clientId"`
+	Currency         string             `json:"currency"`
+	Period           string             `json:"period"`
+	Status           string             `json:"status"`
+	TotalMinorAmount string             `json:"totalMinorAmount"`
+	ItemCount        int                `json:"itemCount"`
+	OpenedAt         time.Time          `json:"openedAt"`
+	ClosedAt         *time.Time         `json:"closedAt"`
+	LineItems        []LineItemResource `json:"lineItems,omitempty"`
 }
 
 type LineItemResource struct {
@@ -62,6 +82,20 @@ type OpenBillRequest struct {
 	Period   string `json:"period"`
 }
 
+type OpenBillResponse struct {
+	BillID           string     `json:"billId"`
+	ClientID         string     `json:"clientId"`
+	Currency         string     `json:"currency"`
+	Period           string     `json:"period"`
+	Status           string     `json:"status"`
+	TotalMinorAmount string     `json:"totalMinorAmount"`
+	ItemCount        int        `json:"itemCount"`
+	OpenedAt         time.Time  `json:"openedAt"`
+	ClosedAt         *time.Time `json:"closedAt"`
+	Location         string     `header:"Location"`
+	HTTPStatus       int        `encore:"httpstatus"`
+}
+
 type AddLineItemRequest struct {
 	Reference   string `json:"reference"`
 	MinorAmount string `json:"minorAmount"`
@@ -74,51 +108,53 @@ type CloseBillRequest struct {
 	Reason string `json:"reason"`
 }
 
+type GetBillRequest struct {
+	IncludeLineItems bool `query:"includeLineItems"`
+}
+
+type ListBillsRequest struct {
+	ClientID string             `query:"clientId"`
+	Status   string             `query:"status"`
+	Currency string             `query:"currency"`
+	Period   string             `query:"period"`
+	Cursor   string             `query:"cursor"`
+	Limit    option.Option[int] `query:"limit"`
+}
+
 type AddLineItemResponse struct {
-	Reference string `json:"reference"`
-	Applied   bool   `json:"applied"`
+	Reference  string `json:"reference"`
+	Applied    bool   `json:"applied"`
+	HTTPStatus int    `encore:"httpstatus"`
 }
 
-type problemResponse struct {
-	Type     string `json:"type"`
-	Title    string `json:"title"`
-	Status   int    `json:"status"`
-	Detail   string `json:"detail"`
-	Instance string `json:"instance"`
+type APIErrorDetails struct {
+	Type string `json:"type"`
 }
 
-//encore:api public raw method=POST path=/v1/bills
-func (s *Service) OpenBill(w http.ResponseWriter, req *http.Request) {
-	var input OpenBillRequest
-	decoder := json.NewDecoder(req.Body)
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&input); err != nil {
-		writeProblem(w, req, http.StatusBadRequest, "invalid-request", "Invalid request", "request body must be valid JSON")
-		return
+func (APIErrorDetails) ErrDetails() {}
+
+//encore:api public method=POST path=/v1/bills
+func (s *Service) OpenBill(ctx context.Context, req *OpenBillRequest) (*OpenBillResponse, error) {
+	if req == nil {
+		return nil, apiError(errs.InvalidArgument, "invalid-request", "request body is required")
 	}
-
-	billInput, validationErr := validateOpenBillRequest(input)
+	billInput, validationErr := validateOpenBillRequest(*req)
 	if validationErr != "" {
-		writeProblem(w, req, http.StatusBadRequest, "invalid-request", "Invalid request", validationErr)
-		return
+		return nil, apiError(errs.InvalidArgument, "invalid-request", validationErr)
 	}
-	supported, err := isSupportedCurrency(req.Context(), billInput.Currency)
+	supported, err := isSupportedCurrency(ctx, billInput.Currency)
 	if err != nil {
 		rlog.Error("open bill: supported currency lookup failed", "currency", billInput.Currency, "problemType", "open-unavailable", "err", err)
-		writeProblem(w, req, http.StatusServiceUnavailable, "open-unavailable", "Open unavailable", "open workflow did not complete; retry after a short delay")
-		return
+		return nil, apiError(errs.Unavailable, "open-unavailable", "open workflow did not complete; retry after a short delay")
 	}
 	if !supported {
-		writeProblem(w, req, http.StatusBadRequest, "unsupported-currency", "Unsupported currency", "currency is not supported")
-		return
+		return nil, apiError(errs.InvalidArgument, "unsupported-currency", "currency is not supported")
 	}
 	if !time.Now().UTC().Before(resolvePeriodEnd(billInput.Period)) {
-		writeProblem(w, req, http.StatusUnprocessableEntity, "period-elapsed", "Period elapsed", "billing period has already elapsed")
-		return
+		return nil, apiError(errs.InvalidArgument, "period-elapsed", "billing period has already elapsed")
 	}
 	if s == nil || s.temporalClient == nil {
-		writeProblem(w, req, http.StatusServiceUnavailable, "open-unavailable", "Open unavailable", "temporal client is not available")
-		return
+		return nil, apiError(errs.Unavailable, "open-unavailable", "temporal client is not available")
 	}
 
 	id := billID(billInput.ClientID, billInput.Currency, billInput.Period)
@@ -132,7 +168,7 @@ func (s *Service) OpenBill(w http.ResponseWriter, req *http.Request) {
 		BillWorkflow,
 		billInput,
 	)
-	handle, err := s.temporalClient.UpdateWithStartWorkflow(req.Context(), client.UpdateWithStartWorkflowOptions{
+	handle, err := s.temporalClient.UpdateWithStartWorkflow(ctx, client.UpdateWithStartWorkflowOptions{
 		StartWorkflowOperation: startOp,
 		UpdateOptions: client.UpdateWorkflowOptions{
 			UpdateName:   UpdateAwaitOpen,
@@ -140,199 +176,171 @@ func (s *Service) OpenBill(w http.ResponseWriter, req *http.Request) {
 		},
 	})
 	if err != nil {
-		writeOpenTemporalError(w, req, err)
-		return
+		return nil, openTemporalError(err)
 	}
 
 	var view BillView
-	if err := handle.Get(req.Context(), &view); err != nil {
-		writeOpenTemporalError(w, req, err)
-		return
+	if err := handle.Get(ctx, &view); err != nil {
+		return nil, openTemporalError(err)
 	}
 
-	resource, err := readOpenedBillResource(req.Context(), id)
+	resource, err := readOpenedBillResource(ctx, id)
 	if err != nil {
-		status := http.StatusInternalServerError
-		problemType := "internal-error"
-		title := "Internal error"
-		detail := "opened bill could not be read"
 		if errors.Is(err, sqldb.ErrNoRows) {
-			status = http.StatusServiceUnavailable
-			problemType = "open-unavailable"
-			title = "Open unavailable"
-			detail = "opened bill was not available after open completed; retry after a short delay"
+			rlog.Error("open bill: read opened bill failed", "billID", id, "problemType", "open-unavailable", "err", err)
+			return nil, apiError(errs.Unavailable, "open-unavailable", "opened bill was not available after open completed; retry after a short delay")
 		}
-		rlog.Error("open bill: read opened bill failed", "billID", id, "problemType", problemType, "err", err)
-		writeProblem(w, req, status, problemType, title, detail)
-		return
+		rlog.Error("open bill: read opened bill failed", "billID", id, "problemType", "internal-error", "err", err)
+		return nil, apiError(errs.Internal, "internal-error", "opened bill could not be read")
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Location", "/v1/bills/"+id)
-	w.WriteHeader(http.StatusCreated)
-	_ = json.NewEncoder(w).Encode(resource)
+	return &OpenBillResponse{
+		BillID:           resource.BillID,
+		ClientID:         resource.ClientID,
+		Currency:         resource.Currency,
+		Period:           resource.Period,
+		Status:           resource.Status,
+		TotalMinorAmount: resource.TotalMinorAmount,
+		ItemCount:        resource.ItemCount,
+		OpenedAt:         resource.OpenedAt,
+		ClosedAt:         resource.ClosedAt,
+		Location:         "/v1/bills/" + id,
+		HTTPStatus:       http.StatusCreated,
+	}, nil
 }
 
-//encore:api public raw method=POST path=/v1/bills/:billId/line-items
-func (s *Service) AddLineItem(w http.ResponseWriter, req *http.Request) {
-	billID := currentBillID(req)
+//encore:api public method=POST path=/v1/bills/:billId/line-items
+func (s *Service) AddLineItem(ctx context.Context, billId string, req *AddLineItemRequest) (*AddLineItemResponse, error) {
+	billID := billId
 	if billID == "" {
-		writeProblem(w, req, http.StatusBadRequest, "invalid-request", "Invalid request", "billId is required")
-		return
+		return nil, apiError(errs.InvalidArgument, "invalid-request", "billId is required")
+	}
+	if req == nil {
+		return nil, apiError(errs.InvalidArgument, "invalid-request", "request body is required")
 	}
 
-	var input AddLineItemRequest
-	decoder := json.NewDecoder(req.Body)
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&input); err != nil {
-		writeProblem(w, req, http.StatusBadRequest, "invalid-request", "Invalid request", "request body must be valid JSON")
-		return
-	}
-
-	lineItem, validationErr := validateAddLineItemRequest(input)
+	lineItem, validationErr := validateAddLineItemRequest(*req)
 	if validationErr != "" {
-		writeProblem(w, req, http.StatusBadRequest, "invalid-request", "Invalid request", validationErr)
-		return
+		return nil, apiError(errs.InvalidArgument, "invalid-request", validationErr)
 	}
 	if s == nil || s.temporalClient == nil {
-		writeProblem(w, req, http.StatusServiceUnavailable, "add-line-item-unavailable", "Add line item unavailable", "add-line-item update did not complete; retry after a short delay")
-		return
+		return nil, apiError(errs.Unavailable, "add-line-item-unavailable", "add-line-item update did not complete; retry after a short delay")
 	}
 
-	handle, err := s.temporalClient.UpdateWorkflow(req.Context(), client.UpdateWorkflowOptions{
+	handle, err := s.temporalClient.UpdateWorkflow(ctx, client.UpdateWorkflowOptions{
 		WorkflowID:   billID,
 		UpdateName:   UpdateAddLineItem,
 		Args:         []interface{}{lineItem},
 		WaitForStage: client.WorkflowUpdateStageCompleted,
 	})
 	if err != nil {
-		writeAddLineItemTemporalError(w, req, billID, err)
-		return
+		return nil, addLineItemTemporalError(ctx, billID, err)
 	}
 
 	var result LineItemResult
-	if err := handle.Get(req.Context(), &result); err != nil {
-		writeAddLineItemTemporalError(w, req, billID, err)
-		return
+	if err := handle.Get(ctx, &result); err != nil {
+		return nil, addLineItemTemporalError(ctx, billID, err)
 	}
 
 	status := http.StatusOK
 	if result.Applied {
 		status = http.StatusCreated
 	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(AddLineItemResponse{
-		Reference: result.Reference,
-		Applied:   result.Applied,
-	})
+	return &AddLineItemResponse{
+		Reference:  result.Reference,
+		Applied:    result.Applied,
+		HTTPStatus: status,
+	}, nil
 }
 
-//encore:api public raw method=POST path=/v1/bills/:billId/close
-func (s *Service) CloseBill(w http.ResponseWriter, req *http.Request) {
-	id := currentBillID(req)
+//encore:api public method=POST path=/v1/bills/:billId/close
+func (s *Service) CloseBill(ctx context.Context, billId string, req *CloseBillRequest) (*InvoiceResource, error) {
+	id := billId
 	if id == "" {
-		writeProblem(w, req, http.StatusBadRequest, "invalid-request", "Invalid request", "billId is required")
-		return
+		return nil, apiError(errs.InvalidArgument, "invalid-request", "billId is required")
+	}
+	input := CloseBillRequest{}
+	if req != nil {
+		input = *req
 	}
 
-	input, ok := decodeCloseBillRequest(w, req)
-	if !ok {
-		return
-	}
-
-	resource, err := readBillResource(req.Context(), id)
+	resource, err := readBillResource(ctx, id)
 	if err != nil {
 		if errors.Is(err, sqldb.ErrNoRows) {
-			writeProblem(w, req, http.StatusNotFound, "bill-not-found", "Bill not found", "bill does not exist")
-			return
+			return nil, apiError(errs.NotFound, "bill-not-found", "bill does not exist")
 		}
 		rlog.Error("close bill: read bill failed", "billID", id, "problemType", "close-unavailable", "err", err)
-		writeProblem(w, req, http.StatusServiceUnavailable, "close-unavailable", "Close unavailable", "close did not complete; retry after a short delay")
-		return
+		return nil, apiError(errs.Unavailable, "close-unavailable", "close did not complete; retry after a short delay")
 	}
 
 	if resource.Status == CLOSED.String() {
-		writeClosedInvoice(w, req, id)
-		return
+		return closedInvoice(ctx, id)
 	}
 	if s == nil || s.temporalClient == nil {
-		writeProblem(w, req, http.StatusServiceUnavailable, "close-unavailable", "Close unavailable", "close did not complete; retry after a short delay")
-		return
+		return nil, apiError(errs.Unavailable, "close-unavailable", "close did not complete; retry after a short delay")
 	}
 
-	if err := s.temporalClient.SignalWorkflow(req.Context(), id, "", SignalCloseBill, CloseSignal{Reason: input.Reason}); err != nil {
-		writeCloseTemporalError(w, req, id, err)
-		return
+	if err := s.temporalClient.SignalWorkflow(ctx, id, "", SignalCloseBill, CloseSignal{Reason: input.Reason}); err != nil {
+		return closeTemporalError(ctx, id, err)
 	}
-	if err := s.temporalClient.GetWorkflow(req.Context(), id, "").Get(req.Context(), nil); err != nil {
-		writeCloseTemporalError(w, req, id, err)
-		return
+	if err := s.temporalClient.GetWorkflow(ctx, id, "").Get(ctx, nil); err != nil {
+		return closeTemporalError(ctx, id, err)
 	}
 
-	sealed, err := readBillResource(req.Context(), id)
+	sealed, err := readBillResource(ctx, id)
 	if err != nil {
 		rlog.Error("close bill: read sealed bill failed", "billID", id, "problemType", "close-unavailable", "err", err)
-		writeProblem(w, req, http.StatusServiceUnavailable, "close-unavailable", "Close unavailable", "close did not complete; retry after a short delay")
-		return
+		return nil, apiError(errs.Unavailable, "close-unavailable", "close did not complete; retry after a short delay")
 	}
 	if sealed.Status != CLOSED.String() {
 		rlog.Error("close bill: workflow completed before ledger was sealed", "billID", id, "status", sealed.Status)
-		writeProblem(w, req, http.StatusServiceUnavailable, "close-unavailable", "Close unavailable", "close did not complete; retry after a short delay")
-		return
+		return nil, apiError(errs.Unavailable, "close-unavailable", "close did not complete; retry after a short delay")
 	}
-	writeClosedInvoice(w, req, id)
+	return closedInvoice(ctx, id)
 }
 
-//encore:api public raw method=GET path=/v1/bills/:billId
-func (s *Service) GetBill(w http.ResponseWriter, req *http.Request) {
-	id := currentBillID(req)
+//encore:api public method=GET path=/v1/bills/:billId
+func (s *Service) GetBill(ctx context.Context, billId string, req *GetBillRequest) (*GetBillResponse, error) {
+	id := billId
 	if id == "" {
-		writeProblem(w, req, http.StatusBadRequest, "invalid-request", "Invalid request", "billId is required")
-		return
+		return nil, apiError(errs.InvalidArgument, "invalid-request", "billId is required")
 	}
-
-	includeLineItems, ok := parseIncludeLineItems(w, req)
-	if !ok {
-		return
+	includeLineItems := false
+	if req != nil {
+		includeLineItems = req.IncludeLineItems
 	}
 
 	if includeLineItems {
-		resource, err := readBillWithLineItemsResource(req.Context(), id)
+		resource, err := readBillWithLineItemsResource(ctx, id)
 		if err != nil {
-			writeReadBillError(w, req, id, err)
-			return
+			return nil, readBillError(id, err)
 		}
-		writeJSON(w, http.StatusOK, resource)
-		return
+		return getBillResponseFromInvoice(resource), nil
 	}
 
-	resource, err := readBillResource(req.Context(), id)
+	resource, err := readBillResource(ctx, id)
 	if err != nil {
-		writeReadBillError(w, req, id, err)
-		return
+		return nil, readBillError(id, err)
 	}
-	writeJSON(w, http.StatusOK, resource)
+	return getBillResponseFromBill(resource), nil
 }
 
-//encore:api public raw method=GET path=/v1/bills
-func (s *Service) ListBills(w http.ResponseWriter, req *http.Request) {
-	opts, ok := parseListBillsOptions(w, req)
-	if !ok {
-		return
+//encore:api public method=GET path=/v1/bills
+func (s *Service) ListBills(ctx context.Context, req *ListBillsRequest) (*ListBillsResponse, error) {
+	opts, err := parseListBillsOptions(req)
+	if err != nil {
+		return nil, err
 	}
 
-	resp, err := listBillResources(req.Context(), opts)
+	resp, err := listBillResources(ctx, opts)
 	if err != nil {
 		if errors.Is(err, errInvalidCursor) {
-			writeProblem(w, req, http.StatusBadRequest, "invalid-request", "Invalid request", "cursor is invalid")
-			return
+			return nil, apiError(errs.InvalidArgument, "invalid-request", "cursor is invalid")
 		}
 		rlog.Error("list bills: read failed", "problemType", "list-unavailable", "err", err)
-		writeProblem(w, req, http.StatusServiceUnavailable, "list-unavailable", "List unavailable", "bills could not be listed; retry after a short delay")
-		return
+		return nil, apiError(errs.Unavailable, "list-unavailable", "bills could not be listed; retry after a short delay")
 	}
-	writeJSON(w, http.StatusOK, resp)
+	return resp, nil
 }
 
 func validateOpenBillRequest(input OpenBillRequest) (BillInput, string) {
@@ -378,221 +386,179 @@ func validateAddLineItemRequest(input AddLineItemRequest) (LineItem, string) {
 	}, ""
 }
 
-func decodeCloseBillRequest(w http.ResponseWriter, req *http.Request) (CloseBillRequest, bool) {
-	var input CloseBillRequest
-	decoder := json.NewDecoder(req.Body)
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&input); err != nil && !errors.Is(err, io.EOF) {
-		writeProblem(w, req, http.StatusBadRequest, "invalid-request", "Invalid request", "request body must be valid JSON")
-		return CloseBillRequest{}, false
+func parseListBillsOptions(req *ListBillsRequest) (listBillsOptions, error) {
+	if req == nil {
+		return listBillsOptions{Limit: defaultListBillsLimit}, nil
 	}
-	return input, true
-}
-
-func parseIncludeLineItems(w http.ResponseWriter, req *http.Request) (bool, bool) {
-	raw := req.URL.Query().Get("includeLineItems")
-	if raw == "" {
-		return false, true
-	}
-
-	includeLineItems, err := strconv.ParseBool(raw)
-	if err != nil {
-		writeProblem(w, req, http.StatusBadRequest, "invalid-request", "Invalid request", "includeLineItems must be a boolean")
-		return false, false
-	}
-	return includeLineItems, true
-}
-
-func parseListBillsOptions(w http.ResponseWriter, req *http.Request) (listBillsOptions, bool) {
-	values := req.URL.Query()
 	opts := listBillsOptions{
-		ClientID: values.Get("clientId"),
-		Status:   values.Get("status"),
-		Currency: values.Get("currency"),
-		Period:   values.Get("period"),
-		Cursor:   values.Get("cursor"),
+		ClientID: req.ClientID,
+		Status:   req.Status,
+		Currency: req.Currency,
+		Period:   req.Period,
+		Cursor:   req.Cursor,
 	}
 
 	if opts.Status != "" && opts.Status != OPEN.String() && opts.Status != CLOSED.String() {
-		writeProblem(w, req, http.StatusBadRequest, "invalid-request", "Invalid request", "status must be OPEN or CLOSED")
-		return listBillsOptions{}, false
+		return listBillsOptions{}, apiError(errs.InvalidArgument, "invalid-request", "status must be OPEN or CLOSED")
 	}
 	if opts.Currency != "" && !currencyPattern.MatchString(opts.Currency) {
-		writeProblem(w, req, http.StatusBadRequest, "invalid-request", "Invalid request", "currency must be a three-letter uppercase ISO-4217 code")
-		return listBillsOptions{}, false
+		return listBillsOptions{}, apiError(errs.InvalidArgument, "invalid-request", "currency must be a three-letter uppercase ISO-4217 code")
 	}
 	if opts.Period != "" && !periodPattern.MatchString(opts.Period) {
-		writeProblem(w, req, http.StatusBadRequest, "invalid-request", "Invalid request", "period must use YYYY-MM calendar-month format")
-		return listBillsOptions{}, false
+		return listBillsOptions{}, apiError(errs.InvalidArgument, "invalid-request", "period must use YYYY-MM calendar-month format")
 	}
 
-	rawLimit := values.Get("limit")
-	if rawLimit == "" {
+	limit, ok := req.Limit.Get()
+	if !ok {
 		opts.Limit = defaultListBillsLimit
-		return opts, true
+		return opts, nil
 	}
 
-	limit, err := strconv.Atoi(rawLimit)
-	if err != nil || limit <= 0 {
-		writeProblem(w, req, http.StatusBadRequest, "invalid-request", "Invalid request", "limit must be a positive integer")
-		return listBillsOptions{}, false
+	if limit <= 0 {
+		return listBillsOptions{}, apiError(errs.InvalidArgument, "invalid-request", "limit must be a positive integer")
 	}
 	if limit > maxListBillsLimit {
 		limit = maxListBillsLimit
 	}
 	opts.Limit = limit
-	return opts, true
+	return opts, nil
 }
 
-func writeOpenTemporalError(w http.ResponseWriter, req *http.Request, err error) {
+func openTemporalError(err error) error {
 	if temporal.IsWorkflowExecutionAlreadyStartedError(err) {
-		writeProblem(w, req, http.StatusConflict, "bill-already-open", "Bill already open", "bill workflow already exists")
-		return
+		return apiError(errs.AlreadyExists, "bill-already-open", "bill workflow already exists")
 	}
 	rlog.Error("open bill: temporal update failed", "problemType", "open-unavailable", "err", err)
-	writeProblem(w, req, http.StatusServiceUnavailable, "open-unavailable", "Open unavailable", "open workflow did not complete; retry after a short delay")
+	return apiError(errs.Unavailable, "open-unavailable", "open workflow did not complete; retry after a short delay")
 }
 
-func writeAddLineItemTemporalError(w http.ResponseWriter, req *http.Request, billID string, err error) {
+func addLineItemTemporalError(ctx context.Context, billID string, err error) error {
 	var appErr *temporal.ApplicationError
 	if errors.As(err, &appErr) {
 		switch appErr.Type() {
 		case "CurrencyMismatch":
-			writeProblem(w, req, http.StatusBadRequest, "currency-mismatch", "Currency mismatch", "line item currency must match bill currency")
-			return
+			return apiError(errs.InvalidArgument, "currency-mismatch", "line item currency must match bill currency")
 		case "BillNotOpen":
-			writeProblem(w, req, http.StatusConflict, "bill-not-open", "Bill not open", "bill is not accepting line items")
-			return
+			return apiError(errs.Aborted, "bill-not-open", "bill is not accepting line items")
 		}
 	}
 
 	var notFoundErr *serviceerror.NotFound
 	if errors.As(err, &notFoundErr) {
-		writeAddLineItemNotFoundFallback(w, req, billID, err)
-		return
+		return addLineItemNotFoundFallback(ctx, billID, err)
 	}
 
 	rlog.Error("add line item: temporal update failed", "problemType", "add-line-item-unavailable", "err", err)
-	writeProblem(w, req, http.StatusServiceUnavailable, "add-line-item-unavailable", "Add line item unavailable", "add-line-item update did not complete; retry after a short delay")
+	return apiError(errs.Unavailable, "add-line-item-unavailable", "add-line-item update did not complete; retry after a short delay")
 }
 
-func writeAddLineItemNotFoundFallback(w http.ResponseWriter, req *http.Request, billID string, temporalErr error) {
-	resource, err := readBillResource(req.Context(), billID)
+func addLineItemNotFoundFallback(ctx context.Context, billID string, temporalErr error) error {
+	resource, err := readBillResource(ctx, billID)
 	if errors.Is(err, sqldb.ErrNoRows) {
-		writeProblem(w, req, http.StatusNotFound, "no-bill", "No bill", "bill does not exist")
-		return
+		return apiError(errs.NotFound, "no-bill", "bill does not exist")
 	}
 	if err != nil {
 		rlog.Error("add line item: ledger fallback failed", "billID", billID, "problemType", "add-line-item-unavailable", "err", err)
-		writeProblem(w, req, http.StatusServiceUnavailable, "add-line-item-unavailable", "Add line item unavailable", "add-line-item update did not complete; retry after a short delay")
-		return
+		return apiError(errs.Unavailable, "add-line-item-unavailable", "add-line-item update did not complete; retry after a short delay")
 	}
 	if resource.Status == CLOSED.String() {
-		writeProblem(w, req, http.StatusConflict, "bill-closed", "Bill closed", "bill is closed and cannot accept line items")
-		return
+		return apiError(errs.Aborted, "bill-closed", "bill is closed and cannot accept line items")
 	}
 
 	rlog.Error("add line item: workflow missing for ledger bill", "billID", billID, "status", resource.Status, "problemType", "add-line-item-unavailable", "err", temporalErr)
-	writeProblem(w, req, http.StatusServiceUnavailable, "add-line-item-unavailable", "Add line item unavailable", "add-line-item update did not complete; retry after a short delay")
+	return apiError(errs.Unavailable, "add-line-item-unavailable", "add-line-item update did not complete; retry after a short delay")
 }
 
-func writeCloseTemporalError(w http.ResponseWriter, req *http.Request, id string, err error) {
+func closeTemporalError(ctx context.Context, id string, err error) (*InvoiceResource, error) {
 	var notFoundErr *serviceerror.NotFound
 	if errors.As(err, &notFoundErr) {
-		invoice, readErr := readClosedInvoiceResource(req.Context(), id)
+		invoice, readErr := readClosedInvoiceResource(ctx, id)
 		if readErr == nil {
-			writeJSON(w, http.StatusOK, invoice)
-			return
+			return invoice, nil
 		}
 		if errors.Is(readErr, sqldb.ErrNoRows) {
-			if _, billErr := readBillResource(req.Context(), id); errors.Is(billErr, sqldb.ErrNoRows) {
-				writeProblem(w, req, http.StatusNotFound, "bill-not-found", "Bill not found", "bill does not exist")
-				return
+			if _, billErr := readBillResource(ctx, id); errors.Is(billErr, sqldb.ErrNoRows) {
+				return nil, apiError(errs.NotFound, "bill-not-found", "bill does not exist")
 			}
 		}
 		rlog.Error("close bill: not-found fallback did not find closed invoice", "billID", id, "problemType", "close-unavailable", "err", readErr)
-		writeProblem(w, req, http.StatusServiceUnavailable, "close-unavailable", "Close unavailable", "close did not complete; retry after a short delay")
-		return
+		return nil, apiError(errs.Unavailable, "close-unavailable", "close did not complete; retry after a short delay")
 	}
 
 	rlog.Error("close bill: temporal close failed", "billID", id, "problemType", "close-unavailable", "err", err)
-	writeProblem(w, req, http.StatusServiceUnavailable, "close-unavailable", "Close unavailable", "close did not complete; retry after a short delay")
+	return nil, apiError(errs.Unavailable, "close-unavailable", "close did not complete; retry after a short delay")
 }
 
-func writeReadBillError(w http.ResponseWriter, req *http.Request, id string, err error) {
+func readBillError(id string, err error) error {
 	if errors.Is(err, sqldb.ErrNoRows) {
-		writeProblem(w, req, http.StatusNotFound, "bill-not-found", "Bill not found", "bill does not exist")
-		return
+		return apiError(errs.NotFound, "bill-not-found", "bill does not exist")
 	}
 	rlog.Error("get bill: read failed", "billID", id, "problemType", "read-unavailable", "err", err)
-	writeProblem(w, req, http.StatusServiceUnavailable, "read-unavailable", "Read unavailable", "bill could not be read; retry after a short delay")
+	return apiError(errs.Unavailable, "read-unavailable", "bill could not be read; retry after a short delay")
 }
 
-func writeProblem(w http.ResponseWriter, req *http.Request, status int, problemType, title, detail string) {
-	w.Header().Set("Content-Type", "application/problem+json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(problemResponse{
-		Type:     problemType,
-		Title:    title,
-		Status:   status,
-		Detail:   detail,
-		Instance: req.URL.Path,
-	})
-}
-
-func writeClosedInvoice(w http.ResponseWriter, req *http.Request, id string) {
-	invoice, err := readClosedInvoiceResource(req.Context(), id)
-	if err != nil {
-		status := http.StatusServiceUnavailable
-		problemType := "close-unavailable"
-		title := "Close unavailable"
-		detail := "close did not complete; retry after a short delay"
-		if errors.Is(err, sqldb.ErrNoRows) {
-			status = http.StatusNotFound
-			problemType = "bill-not-found"
-			title = "Bill not found"
-			detail = "bill does not exist"
-		}
-		rlog.Error("close bill: read closed invoice failed", "billID", id, "problemType", problemType, "err", err)
-		writeProblem(w, req, status, problemType, title, detail)
-		return
+func closedInvoice(ctx context.Context, id string) (*InvoiceResource, error) {
+	invoice, err := readClosedInvoiceResource(ctx, id)
+	if err == nil {
+		return invoice, nil
 	}
-	writeJSON(w, http.StatusOK, invoice)
+	if errors.Is(err, sqldb.ErrNoRows) {
+		rlog.Error("close bill: read closed invoice failed", "billID", id, "problemType", "bill-not-found", "err", err)
+		return nil, apiError(errs.NotFound, "bill-not-found", "bill does not exist")
+	}
+	rlog.Error("close bill: read closed invoice failed", "billID", id, "problemType", "close-unavailable", "err", err)
+	return nil, apiError(errs.Unavailable, "close-unavailable", "close did not complete; retry after a short delay")
 }
 
-func writeJSON(w http.ResponseWriter, status int, body interface{}) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(body)
+func getBillResponseFromBill(resource *BillResource) *GetBillResponse {
+	return &GetBillResponse{
+		BillID:           resource.BillID,
+		ClientID:         resource.ClientID,
+		Currency:         resource.Currency,
+		Period:           resource.Period,
+		Status:           resource.Status,
+		TotalMinorAmount: resource.TotalMinorAmount,
+		ItemCount:        resource.ItemCount,
+		OpenedAt:         resource.OpenedAt,
+		ClosedAt:         resource.ClosedAt,
+	}
 }
 
-func currentBillID(req *http.Request) string {
-	if billID := currentEncoreBillID(); billID != "" {
-		return billID
+func getBillResponseFromInvoice(resource *InvoiceResource) *GetBillResponse {
+	return &GetBillResponse{
+		BillID:           resource.BillID,
+		ClientID:         resource.ClientID,
+		Currency:         resource.Currency,
+		Period:           resource.Period,
+		Status:           resource.Status,
+		TotalMinorAmount: resource.TotalMinorAmount,
+		ItemCount:        resource.ItemCount,
+		OpenedAt:         resource.OpenedAt,
+		ClosedAt:         resource.ClosedAt,
+		LineItems:        resource.LineItems,
 	}
-
-	// Direct handler tests do not run through Encore's router, so path params are
-	// unavailable. Keep production extraction above and parse only as a fallback.
-	path := strings.Trim(req.URL.Path, "/")
-	const prefix = "v1/bills/"
-	if !strings.HasPrefix(path, prefix) {
-		return ""
-	}
-	rest := strings.TrimPrefix(path, prefix)
-	for _, suffix := range []string{"/line-items", "/close"} {
-		if strings.HasSuffix(rest, suffix) {
-			return strings.TrimSuffix(rest, suffix)
-		}
-	}
-	return rest
 }
 
-func currentEncoreBillID() (billID string) {
-	defer func() {
-		if recover() != nil {
-			billID = ""
-		}
-	}()
+func invoiceResourceFromBill(resource *BillResource, items []LineItemResource) *InvoiceResource {
+	return &InvoiceResource{
+		BillID:           resource.BillID,
+		ClientID:         resource.ClientID,
+		Currency:         resource.Currency,
+		Period:           resource.Period,
+		Status:           resource.Status,
+		TotalMinorAmount: resource.TotalMinorAmount,
+		ItemCount:        resource.ItemCount,
+		OpenedAt:         resource.OpenedAt,
+		ClosedAt:         resource.ClosedAt,
+		LineItems:        items,
+	}
+}
 
-	return encore.CurrentRequest().PathParams.Get("billId")
+func apiError(code errs.ErrCode, problemType, message string, metaPairs ...interface{}) error {
+	return errs.B().
+		Code(code).
+		Msg(message).
+		Details(APIErrorDetails{Type: problemType}).
+		Meta(metaPairs...).
+		Err()
 }

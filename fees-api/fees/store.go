@@ -164,10 +164,7 @@ func readBillWithLineItemsResource(ctx context.Context, id string) (*InvoiceReso
 	}
 	committed = true
 
-	return &InvoiceResource{
-		BillResource: *resource,
-		LineItems:    items,
-	}, nil
+	return invoiceResourceFromBill(resource, items), nil
 }
 
 func readClosedInvoiceResource(ctx context.Context, id string) (*InvoiceResource, error) {

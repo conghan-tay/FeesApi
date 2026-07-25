@@ -97,11 +97,11 @@ type ListBillsResponse struct {
 }
 
 type Problem struct {
-	Type     string `json:"type"`
-	Title    string `json:"title"`
-	Status   int    `json:"status"`
-	Detail   string `json:"detail"`
-	Instance string `json:"instance"`
+	Code    string `json:"code"`
+	Message string `json:"message"`
+	Details struct {
+		Type string `json:"type"`
+	} `json:"details"`
 }
 
 type Response[T any] struct {
