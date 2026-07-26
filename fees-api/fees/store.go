@@ -368,45 +368,40 @@ func readBillLineItemsPageFrom(ctx context.Context, q ledgerQuerier, id string, 
 	}
 	defer rows.Close()
 
-	type itemWithID struct {
-		id   int64
-		item LineItemResource
-	}
-	itemsWithIDs := []itemWithID{}
+	items := []LineItemResource{}
+	itemIDs := []int64{}
 	for rows.Next() {
-		var row itemWithID
+		var item LineItemResource
+		var itemID int64
 		var amountMinor int64
 		if err := rows.Scan(
-			&row.id,
-			&row.item.Reference,
+			&itemID,
+			&item.Reference,
 			&amountMinor,
-			&row.item.Currency,
-			&row.item.FeeType,
-			&row.item.Description,
-			&row.item.AppliedAt,
+			&item.Currency,
+			&item.FeeType,
+			&item.Description,
+			&item.AppliedAt,
 		); err != nil {
 			return nil, "", false, err
 		}
-		row.item.MinorAmount = strconv.FormatInt(amountMinor, 10)
-		itemsWithIDs = append(itemsWithIDs, row)
+		item.MinorAmount = strconv.FormatInt(amountMinor, 10)
+		items = append(items, item)
+		itemIDs = append(itemIDs, itemID)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, "", false, err
 	}
 
-	hasMore := len(itemsWithIDs) > limit
+	hasMore := len(items) > limit
 	if hasMore {
-		itemsWithIDs = itemsWithIDs[:limit]
-	}
-
-	items := make([]LineItemResource, 0, len(itemsWithIDs))
-	for _, row := range itemsWithIDs {
-		items = append(items, row.item)
+		items = items[:limit]
+		itemIDs = itemIDs[:limit]
 	}
 
 	nextCursor := ""
-	if hasMore && len(itemsWithIDs) > 0 {
-		nextCursor = encodeLineItemsCursor(id, itemsWithIDs[len(itemsWithIDs)-1].id)
+	if hasMore && len(itemIDs) > 0 {
+		nextCursor = encodeLineItemsCursor(id, itemIDs[len(itemIDs)-1])
 	}
 	return items, nextCursor, hasMore, nil
 }
