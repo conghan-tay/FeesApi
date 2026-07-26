@@ -190,14 +190,35 @@ func TestFeesLifecycleE2E(t *testing.T) {
 	})
 
 	t.Run("get with line items and list find the bill", func(t *testing.T) {
-		getResp, err := client.GetBill(ctx, billID, true)
-		requireNoClientError(t, err)
-		requireStatus(t, getResp, http.StatusOK)
-		if getResp.Body == nil {
-			t.Fatal("expected bill body")
+		var gotItems []LineItemResource
+		cursor := ""
+		for page := 1; page <= 2; page++ {
+			getResp, err := client.GetBillPage(ctx, billID, GetBillParams{
+				IncludeLineItems: true,
+				Cursor:           cursor,
+				Limit:            2,
+			})
+			requireNoClientError(t, err)
+			requireStatus(t, getResp, http.StatusOK)
+			if getResp.Body == nil {
+				t.Fatalf("page %d expected bill body", page)
+			}
+			gotItems = append(gotItems, getResp.Body.LineItems...)
+
+			wantHasMore := page == 1
+			if getResp.Body.HasMore != wantHasMore {
+				t.Fatalf("page %d hasMore = %v, want %v", page, getResp.Body.HasMore, wantHasMore)
+			}
+			if wantHasMore && getResp.Body.NextCursor == "" {
+				t.Fatalf("page %d nextCursor is empty, want cursor", page)
+			}
+			if !wantHasMore && getResp.Body.NextCursor != "" {
+				t.Fatalf("page %d nextCursor = %q, want empty", page, getResp.Body.NextCursor)
+			}
+			cursor = getResp.Body.NextCursor
 		}
-		if len(getResp.Body.LineItems) != len(items) {
-			t.Fatalf("GET lineItems length = %d, want %d", len(getResp.Body.LineItems), len(items))
+		if len(gotItems) != len(items) {
+			t.Fatalf("GET lineItems length = %d, want %d", len(gotItems), len(items))
 		}
 
 		listResp, err := client.ListBills(ctx, ListBillsParams{

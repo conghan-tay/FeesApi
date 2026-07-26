@@ -201,11 +201,48 @@ close mutates an existing resource's state, it doesn't create one. A closed
 ```
 GET /v1/bills/{billId}
 GET /v1/bills/{billId}?includeLineItems=true
+GET /v1/bills/{billId}?includeLineItems=true&cursor=...&limit=50
 ```
 
 Pure ledger read — works while OPEN and after the workflow ages out of retention.
-`total`/`itemCount` computed via `SUM`/`COUNT`. `includeLineItems=true` appends the
-itemized array (default omits it to keep the hot read cheap). `404` if absent.
+`total`/`itemCount` computed via `SUM`/`COUNT` across all rows. `includeLineItems=true`
+appends one cursor-paginated page of itemized rows (default 50, cap 200), plus
+`nextCursor` and `hasMore`. The default omits `lineItems` and pagination metadata
+to keep the hot read cheap. `404` if absent.
+
+```json
+{
+  "billId": "bill-acme-USD-2026-07",
+  "clientId": "acme",
+  "currency": "USD",
+  "period": "2026-07",
+  "status": "OPEN",
+  "totalMinorAmount": "43700",
+  "itemCount": 12,
+  "openedAt": "2026-07-03T14:21:00Z",
+  "closedAt": null,
+  "lineItems": [
+    {
+      "reference": "pay-svc-evt-98213",
+      "minorAmount": "1500",
+      "currency": "USD",
+      "feeType": "wire_transfer",
+      "description": "Outbound USD wire",
+      "appliedAt": "2026-07-03T14:22:03Z"
+    }
+  ],
+  "nextCursor": "b3BhcXVlLWtleQ",
+  "hasMore": true
+}
+```
+
+The line-item cursor is opaque and bill-scoped. Closed bills provide a stable
+page traversal because invoice line items are immutable. Open bills provide
+deterministic keyset pagination over rows visible to each request; concurrent
+line-item commits can change later pages until the bill is closed.
+
+`cursor` and `limit` are valid only with `includeLineItems=true`; otherwise the
+API returns `400 invalid-request`.
 
 **Transient status note.** There's a brief window at close where the workflow has
 stopped accepting items (in-memory status flipped) but the seal `UPDATE` hasn't

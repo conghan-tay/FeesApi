@@ -65,6 +65,8 @@ type BillResource struct {
 	OpenedAt         string             `json:"openedAt"`
 	ClosedAt         *string            `json:"closedAt"`
 	LineItems        []LineItemResource `json:"lineItems,omitempty"`
+	NextCursor       string             `json:"nextCursor"`
+	HasMore          bool               `json:"hasMore"`
 }
 
 type LineItemResource struct {
@@ -88,6 +90,12 @@ type ListBillsParams struct {
 	Period   string
 	Cursor   string
 	Limit    int
+}
+
+type GetBillParams struct {
+	IncludeLineItems bool
+	Cursor           string
+	Limit            int
 }
 
 type ListBillsResponse struct {
@@ -125,9 +133,23 @@ func (c *Client) CloseBill(ctx context.Context, billID string, req CloseBillRequ
 }
 
 func (c *Client) GetBill(ctx context.Context, billID string, includeLineItems bool) (*Response[BillResource], error) {
+	return c.GetBillPage(ctx, billID, GetBillParams{IncludeLineItems: includeLineItems})
+}
+
+func (c *Client) GetBillPage(ctx context.Context, billID string, params GetBillParams) (*Response[BillResource], error) {
 	path := "/v1/bills/" + url.PathEscape(billID)
-	if includeLineItems {
-		path += "?includeLineItems=true"
+	values := url.Values{}
+	if params.IncludeLineItems {
+		values.Set("includeLineItems", "true")
+	}
+	if params.Cursor != "" {
+		values.Set("cursor", params.Cursor)
+	}
+	if params.Limit > 0 {
+		values.Set("limit", strconv.Itoa(params.Limit))
+	}
+	if encoded := values.Encode(); encoded != "" {
+		path += "?" + encoded
 	}
 	return do[BillResource](ctx, c, http.MethodGet, path, nil)
 }
