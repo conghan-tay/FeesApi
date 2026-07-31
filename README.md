@@ -1,3 +1,3 @@
-# PaveBank Fees API
+# Fees API
 
 Implementation in folder fees-api
