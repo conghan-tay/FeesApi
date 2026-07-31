@@ -1,6 +1,6 @@
 # PaveBank Fees API
 
-Encore Go implementation of the PaveBank Fees API take-home: a billing-period
+Encore Go implementation of a simple Fees API: a billing-period
 fees service backed by Temporal orchestration and a Postgres ledger.
 
 ## Architecture Map
