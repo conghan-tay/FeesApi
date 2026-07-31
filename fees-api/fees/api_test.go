@@ -88,6 +88,12 @@ func TestGetBillReturnsComputedTotalWithoutTemporal(t *testing.T) {
 	if _, ok := raw["lineItems"]; ok {
 		t.Fatal("lineItems present without includeLineItems=true")
 	}
+	if _, ok := raw["nextCursor"]; ok {
+		t.Fatal("nextCursor present without includeLineItems=true")
+	}
+	if _, ok := raw["hasMore"]; ok {
+		t.Fatal("hasMore present without includeLineItems=true")
+	}
 }
 
 func TestGetBillWithLineItemsIncludesOrderedItems(t *testing.T) {
@@ -103,15 +109,115 @@ func TestGetBillWithLineItemsIncludesOrderedItems(t *testing.T) {
 	if resp.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200. Body: %s", resp.Code, resp.Body.String())
 	}
-	invoice := decodeInvoiceResource(t, resp)
-	if invoice.TotalMinorAmount != "1000" || invoice.ItemCount != 2 {
-		t.Fatalf("total/count = %s/%d, want 1000/2", invoice.TotalMinorAmount, invoice.ItemCount)
+	body := decodeGetBillResponse(t, resp)
+	if body.TotalMinorAmount != "1000" || body.ItemCount != 2 {
+		t.Fatalf("total/count = %s/%d, want 1000/2", body.TotalMinorAmount, body.ItemCount)
 	}
-	if len(invoice.LineItems) != 2 {
-		t.Fatalf("lineItems length = %d, want 2", len(invoice.LineItems))
+	if body.LineItems == nil {
+		t.Fatal("lineItems missing, want included page")
 	}
-	if invoice.LineItems[0].Reference != "ref-get-items-001" || invoice.LineItems[1].Reference != "ref-get-items-002" {
-		t.Fatalf("line item order = %#v, want insertion order", invoice.LineItems)
+	if len(*body.LineItems) != 2 {
+		t.Fatalf("lineItems length = %d, want 2", len(*body.LineItems))
+	}
+	if (*body.LineItems)[0].Reference != "ref-get-items-001" || (*body.LineItems)[1].Reference != "ref-get-items-002" {
+		t.Fatalf("line item order = %#v, want insertion order", *body.LineItems)
+	}
+	if body.NextCursor == nil || *body.NextCursor != "" {
+		t.Fatalf("nextCursor = %v, want empty cursor", body.NextCursor)
+	}
+	if body.HasMore == nil || *body.HasMore {
+		t.Fatalf("hasMore = %v, want false", body.HasMore)
+	}
+}
+
+func TestGetBillLineItemsPaginatesWithCursor(t *testing.T) {
+	ctx := context.Background()
+	billID := "bill-api-get-page-USD-2099-01"
+	cleanupActivityBill(t, ctx, billID)
+	seedActivityBill(t, ctx, billID, "api-get-page", "USD", "2099-01", "OPEN", nil)
+	for i := 1; i <= 5; i++ {
+		seedAPILineItem(t, ctx, billID, "ref-get-page-00"+strconv.Itoa(i), 100, "USD", "wire_transfer", "Paged item")
+	}
+
+	cursor := ""
+	wantPages := [][]string{
+		{"ref-get-page-001", "ref-get-page-002"},
+		{"ref-get-page-003", "ref-get-page-004"},
+		{"ref-get-page-005"},
+	}
+	for page, wantRefs := range wantPages {
+		values := url.Values{
+			"includeLineItems": []string{"true"},
+			"limit":            []string{"2"},
+		}
+		if cursor != "" {
+			values.Set("cursor", cursor)
+		}
+		resp := performGetBillWithQuery(t, &Service{}, billID, values)
+		if resp.Code != http.StatusOK {
+			t.Fatalf("page %d status = %d, want 200. Body: %s", page+1, resp.Code, resp.Body.String())
+		}
+		body := decodeGetBillResponse(t, resp)
+		if body.TotalMinorAmount != "500" || body.ItemCount != 5 {
+			t.Fatalf("page %d total/count = %s/%d, want 500/5", page+1, body.TotalMinorAmount, body.ItemCount)
+		}
+		if body.LineItems == nil {
+			t.Fatalf("page %d lineItems missing", page+1)
+		}
+		if len(*body.LineItems) != len(wantRefs) {
+			t.Fatalf("page %d lineItems length = %d, want %d: %#v", page+1, len(*body.LineItems), len(wantRefs), *body.LineItems)
+		}
+		for i, wantRef := range wantRefs {
+			if (*body.LineItems)[i].Reference != wantRef {
+				t.Fatalf("page %d item %d reference = %q, want %q", page+1, i, (*body.LineItems)[i].Reference, wantRef)
+			}
+		}
+
+		wantHasMore := page < len(wantPages)-1
+		if body.HasMore == nil || *body.HasMore != wantHasMore {
+			t.Fatalf("page %d hasMore = %v, want %v", page+1, body.HasMore, wantHasMore)
+		}
+		if body.NextCursor == nil {
+			t.Fatalf("page %d nextCursor missing", page+1)
+		}
+		if wantHasMore && *body.NextCursor == "" {
+			t.Fatalf("page %d nextCursor is empty, want cursor", page+1)
+		}
+		if !wantHasMore && *body.NextCursor != "" {
+			t.Fatalf("page %d nextCursor = %q, want empty", page+1, *body.NextCursor)
+		}
+		cursor = *body.NextCursor
+	}
+}
+
+func TestGetBillLineItemsDefaultLimit(t *testing.T) {
+	ctx := context.Background()
+	billID := "bill-api-get-default-page-USD-2099-01"
+	cleanupActivityBill(t, ctx, billID)
+	seedActivityBill(t, ctx, billID, "api-get-default-page", "USD", "2099-01", "OPEN", nil)
+	for i := 1; i <= defaultLineItemsLimit+1; i++ {
+		seedAPILineItem(t, ctx, billID, "ref-get-default-"+strconv.Itoa(i), 1, "USD", "wire_transfer", "Default page item")
+	}
+
+	resp := performGetBill(t, &Service{}, billID, "true")
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200. Body: %s", resp.Code, resp.Body.String())
+	}
+	body := decodeGetBillResponse(t, resp)
+	if body.LineItems == nil {
+		t.Fatal("lineItems missing, want default page")
+	}
+	if len(*body.LineItems) != defaultLineItemsLimit {
+		t.Fatalf("lineItems length = %d, want default limit %d", len(*body.LineItems), defaultLineItemsLimit)
+	}
+	if body.ItemCount != defaultLineItemsLimit+1 || body.TotalMinorAmount != strconv.Itoa(defaultLineItemsLimit+1) {
+		t.Fatalf("total/count = %s/%d, want %d/%d", body.TotalMinorAmount, body.ItemCount, defaultLineItemsLimit+1, defaultLineItemsLimit+1)
+	}
+	if body.HasMore == nil || !*body.HasMore {
+		t.Fatalf("hasMore = %v, want true", body.HasMore)
+	}
+	if body.NextCursor == nil || *body.NextCursor == "" {
+		t.Fatalf("nextCursor = %v, want cursor", body.NextCursor)
 	}
 }
 
@@ -198,6 +304,41 @@ func TestGetBillMissingAndBadIncludeLineItems(t *testing.T) {
 		t.Fatalf("bad query status = %d, want 400. Body: %s", badQuery.Code, badQuery.Body.String())
 	}
 	assertProblem(t, badQuery, "invalid-request", http.StatusBadRequest)
+
+	seedActivityBill(t, ctx, billID, "api-get-missing", "USD", "2099-01", "OPEN", nil)
+	badCursor := performGetBillWithQuery(t, &Service{}, billID, url.Values{
+		"includeLineItems": []string{"true"},
+		"cursor":           []string{"not-a-cursor"},
+	})
+	if badCursor.Code != http.StatusBadRequest {
+		t.Fatalf("bad cursor status = %d, want 400. Body: %s", badCursor.Code, badCursor.Body.String())
+	}
+	assertProblem(t, badCursor, "invalid-request", http.StatusBadRequest)
+
+	wrongBillCursor := performGetBillWithQuery(t, &Service{}, billID, url.Values{
+		"includeLineItems": []string{"true"},
+		"cursor":           []string{encodeLineItemsCursor("bill-api-get-other-USD-2099-01", 1)},
+	})
+	if wrongBillCursor.Code != http.StatusBadRequest {
+		t.Fatalf("wrong-bill cursor status = %d, want 400. Body: %s", wrongBillCursor.Code, wrongBillCursor.Body.String())
+	}
+	assertProblem(t, wrongBillCursor, "invalid-request", http.StatusBadRequest)
+
+	limitWithoutItems := performGetBillWithQuery(t, &Service{}, billID, url.Values{
+		"limit": []string{"2"},
+	})
+	if limitWithoutItems.Code != http.StatusBadRequest {
+		t.Fatalf("limit without include status = %d, want 400. Body: %s", limitWithoutItems.Code, limitWithoutItems.Body.String())
+	}
+	assertProblem(t, limitWithoutItems, "invalid-request", http.StatusBadRequest)
+
+	cursorWithoutItems := performGetBillWithQuery(t, &Service{}, billID, url.Values{
+		"cursor": []string{encodeLineItemsCursor(billID, 1)},
+	})
+	if cursorWithoutItems.Code != http.StatusBadRequest {
+		t.Fatalf("cursor without include status = %d, want 400. Body: %s", cursorWithoutItems.Code, cursorWithoutItems.Body.String())
+	}
+	assertProblem(t, cursorWithoutItems, "invalid-request", http.StatusBadRequest)
 }
 
 func TestListBillsReturnsEmptyForUnmatchedFilter(t *testing.T) {
@@ -1402,18 +1543,39 @@ func performCloseBill(t *testing.T, svc *Service, billID, body string) *httptest
 func performGetBill(t *testing.T, svc *Service, billID, includeLineItems string) *httptest.ResponseRecorder {
 	t.Helper()
 
-	include := false
 	if includeLineItems != "" {
-		parsed, err := strconv.ParseBool(includeLineItems)
+		return performGetBillWithQuery(t, svc, billID, url.Values{"includeLineItems": []string{includeLineItems}})
+	}
+	return performGetBillWithQuery(t, svc, billID, nil)
+}
+
+func performGetBillWithQuery(t *testing.T, svc *Service, billID string, values url.Values) *httptest.ResponseRecorder {
+	t.Helper()
+
+	req := &GetBillRequest{
+		Cursor: values.Get("cursor"),
+	}
+	if rawInclude := values.Get("includeLineItems"); rawInclude != "" {
+		parsed, err := strconv.ParseBool(rawInclude)
 		if err != nil {
 			resp := httptest.NewRecorder()
 			errs.HTTPError(resp, apiError(errs.InvalidArgument, "invalid-request", "includeLineItems must be a boolean"))
 			return resp
 		}
-		include = parsed
+		req.IncludeLineItems = parsed
 	}
+	if rawLimit := values.Get("limit"); rawLimit != "" {
+		limit, err := strconv.Atoi(rawLimit)
+		if err != nil {
+			resp := httptest.NewRecorder()
+			errs.HTTPError(resp, apiError(errs.InvalidArgument, "invalid-request", "limit must be an integer"))
+			return resp
+		}
+		req.Limit = option.Some(limit)
+	}
+
 	resp := httptest.NewRecorder()
-	out, err := svc.GetBill(context.Background(), billID, &GetBillRequest{IncludeLineItems: include})
+	out, err := svc.GetBill(context.Background(), billID, req)
 	if err != nil {
 		errs.HTTPError(resp, err)
 		return resp
@@ -1531,6 +1693,16 @@ func decodeInvoiceResource(t *testing.T, resp *httptest.ResponseRecorder) Invoic
 	var body InvoiceResource
 	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
 		t.Fatalf("decode invoice response body: %v", err)
+	}
+	return body
+}
+
+func decodeGetBillResponse(t *testing.T, resp *httptest.ResponseRecorder) GetBillResponse {
+	t.Helper()
+
+	var body GetBillResponse
+	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode get bill response body: %v", err)
 	}
 	return body
 }

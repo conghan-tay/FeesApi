@@ -16,6 +16,8 @@ import (
 const (
 	defaultListBillsLimit = 50
 	maxListBillsLimit     = 200
+	defaultLineItemsLimit = defaultListBillsLimit
+	maxLineItemsLimit     = maxListBillsLimit
 )
 
 var errInvalidCursor = errors.New("invalid cursor")
@@ -29,9 +31,27 @@ type listBillsOptions struct {
 	Limit    int
 }
 
+type getBillOptions struct {
+	IncludeLineItems bool
+	Cursor           string
+	Limit            int
+}
+
 type listBillsCursor struct {
 	OpenedAt string `json:"openedAt"`
 	BillID   string `json:"billId"`
+}
+
+type lineItemsCursor struct {
+	BillID string `json:"billId"`
+	ID     int64  `json:"id"`
+}
+
+type billLineItemsPageResource struct {
+	Bill       *BillResource
+	LineItems  []LineItemResource
+	NextCursor string
+	HasMore    bool
 }
 
 type ledgerQuerier interface {
@@ -167,6 +187,58 @@ func readBillWithLineItemsResource(ctx context.Context, id string) (*InvoiceReso
 	return invoiceResourceFromBill(resource, items), nil
 }
 
+func readBillWithLineItemsPageResource(ctx context.Context, id string, opts getBillOptions) (*billLineItemsPageResource, error) {
+	if opts.Cursor != "" {
+		cursorBillID, _, err := decodeLineItemsCursor(opts.Cursor)
+		if err != nil {
+			return nil, err
+		}
+		if cursorBillID != id {
+			return nil, errInvalidCursor
+		}
+	}
+
+	tx, err := db.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin repeatable-read bill detail transaction: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	if _, err := tx.Exec(ctx, `SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY`); err != nil {
+		return nil, fmt.Errorf("set repeatable-read bill detail transaction: %w", err)
+	}
+
+	resource, err := readBillMetadataFrom(ctx, tx, id)
+	if err != nil {
+		return nil, err
+	}
+	if err := readBillAggregatesInto(ctx, tx, resource); err != nil {
+		return nil, err
+	}
+
+	items, nextCursor, hasMore, err := readBillLineItemsPageFrom(ctx, tx, id, opts)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit repeatable-read bill detail transaction: %w", err)
+	}
+	committed = true
+
+	return &billLineItemsPageResource{
+		Bill:       resource,
+		LineItems:  items,
+		NextCursor: nextCursor,
+		HasMore:    hasMore,
+	}, nil
+}
+
 func readClosedInvoiceResource(ctx context.Context, id string) (*InvoiceResource, error) {
 	resource, err := readBillWithLineItemsResource(ctx, id)
 	if err != nil {
@@ -221,6 +293,117 @@ func readBillLineItemsFrom(ctx context.Context, q ledgerQuerier, id string) ([]L
 		return nil, err
 	}
 	return items, nil
+}
+
+func readBillAggregatesInto(ctx context.Context, q ledgerQuerier, resource *BillResource) error {
+	var totalMinor int64
+	err := q.QueryRow(ctx, `
+		SELECT COALESCE(SUM(amount_minor), 0),
+		       COUNT(id)
+		  FROM line_items
+		 WHERE bill_id = $1`,
+		resource.BillID,
+	).Scan(
+		&totalMinor,
+		&resource.ItemCount,
+	)
+	if err != nil {
+		return err
+	}
+	resource.TotalMinorAmount = strconv.FormatInt(totalMinor, 10)
+	return nil
+}
+
+func readBillLineItemsPageFrom(ctx context.Context, q ledgerQuerier, id string, opts getBillOptions) ([]LineItemResource, string, bool, error) {
+	limit := opts.Limit
+	if limit == 0 {
+		limit = defaultLineItemsLimit
+	}
+
+	var afterID int64
+	if opts.Cursor != "" {
+		cursorBillID, cursorID, err := decodeLineItemsCursor(opts.Cursor)
+		if err != nil {
+			return nil, "", false, err
+		}
+		if cursorBillID != id {
+			return nil, "", false, errInvalidCursor
+		}
+		afterID = cursorID
+	}
+
+	args := []interface{}{id, limit + 1}
+	query := `
+		SELECT id,
+		       reference,
+		       amount_minor,
+		       currency,
+		       fee_type,
+		       description,
+		       applied_at
+		  FROM line_items
+		 WHERE bill_id = $1
+		 ORDER BY id
+		 LIMIT $2`
+	if afterID > 0 {
+		args = []interface{}{id, afterID, limit + 1}
+		query = `
+			SELECT id,
+			       reference,
+			       amount_minor,
+			       currency,
+			       fee_type,
+			       description,
+			       applied_at
+			  FROM line_items
+			 WHERE bill_id = $1
+			   AND id > $2
+			 ORDER BY id
+			 LIMIT $3`
+	}
+
+	rows, err := q.Query(ctx, query, args...)
+	if err != nil {
+		return nil, "", false, err
+	}
+	defer rows.Close()
+
+	items := []LineItemResource{}
+	itemIDs := []int64{}
+	for rows.Next() {
+		var item LineItemResource
+		var itemID int64
+		var amountMinor int64
+		if err := rows.Scan(
+			&itemID,
+			&item.Reference,
+			&amountMinor,
+			&item.Currency,
+			&item.FeeType,
+			&item.Description,
+			&item.AppliedAt,
+		); err != nil {
+			return nil, "", false, err
+		}
+		item.MinorAmount = strconv.FormatInt(amountMinor, 10)
+		items = append(items, item)
+		itemIDs = append(itemIDs, itemID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, "", false, err
+	}
+
+	hasMore := len(items) > limit
+	if hasMore {
+		items = items[:limit]
+		itemIDs = itemIDs[:limit]
+	}
+
+	nextCursor := ""
+	if hasMore && len(itemIDs) > 0 {
+		nextCursor = encodeLineItemsCursor(id, itemIDs[len(itemIDs)-1])
+	}
+	return items, nextCursor, hasMore, nil
 }
 
 func applyLineItemAggregates(resource *BillResource, items []LineItemResource) error {
@@ -380,4 +563,28 @@ func decodeListBillsCursor(cursor string) (time.Time, string, error) {
 		return time.Time{}, "", errInvalidCursor
 	}
 	return openedAt, payload.BillID, nil
+}
+
+func encodeLineItemsCursor(billID string, id int64) string {
+	payload, _ := json.Marshal(lineItemsCursor{
+		BillID: billID,
+		ID:     id,
+	})
+	return base64.RawURLEncoding.EncodeToString(payload)
+}
+
+func decodeLineItemsCursor(cursor string) (string, int64, error) {
+	raw, err := base64.RawURLEncoding.DecodeString(cursor)
+	if err != nil {
+		return "", 0, errInvalidCursor
+	}
+
+	var payload lineItemsCursor
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return "", 0, errInvalidCursor
+	}
+	if payload.BillID == "" || payload.ID <= 0 {
+		return "", 0, errInvalidCursor
+	}
+	return payload.BillID, payload.ID, nil
 }

@@ -190,14 +190,35 @@ func TestFeesLifecycleE2E(t *testing.T) {
 	})
 
 	t.Run("get with line items and list find the bill", func(t *testing.T) {
-		getResp, err := client.GetBill(ctx, billID, true)
-		requireNoClientError(t, err)
-		requireStatus(t, getResp, http.StatusOK)
-		if getResp.Body == nil {
-			t.Fatal("expected bill body")
+		var gotItems []LineItemResource
+		cursor := ""
+		for page := 1; page <= 2; page++ {
+			getResp, err := client.GetBillPage(ctx, billID, GetBillParams{
+				IncludeLineItems: true,
+				Cursor:           cursor,
+				Limit:            2,
+			})
+			requireNoClientError(t, err)
+			requireStatus(t, getResp, http.StatusOK)
+			if getResp.Body == nil {
+				t.Fatalf("page %d expected bill body", page)
+			}
+			gotItems = append(gotItems, getResp.Body.LineItems...)
+
+			wantHasMore := page == 1
+			if getResp.Body.HasMore != wantHasMore {
+				t.Fatalf("page %d hasMore = %v, want %v", page, getResp.Body.HasMore, wantHasMore)
+			}
+			if wantHasMore && getResp.Body.NextCursor == "" {
+				t.Fatalf("page %d nextCursor is empty, want cursor", page)
+			}
+			if !wantHasMore && getResp.Body.NextCursor != "" {
+				t.Fatalf("page %d nextCursor = %q, want empty", page, getResp.Body.NextCursor)
+			}
+			cursor = getResp.Body.NextCursor
 		}
-		if len(getResp.Body.LineItems) != len(items) {
-			t.Fatalf("GET lineItems length = %d, want %d", len(getResp.Body.LineItems), len(items))
+		if len(gotItems) != len(items) {
+			t.Fatalf("GET lineItems length = %d, want %d", len(gotItems), len(items))
 		}
 
 		listResp, err := client.ListBills(ctx, ListBillsParams{
@@ -233,6 +254,189 @@ func TestFeesLifecycleE2E(t *testing.T) {
 				t.Fatalf("closed bill %q appeared in status=OPEN list; status filter was not applied", billID)
 			}
 		}
+	})
+}
+
+func TestListBillsFilteringAndPaginationE2E(t *testing.T) {
+	if os.Getenv("PAVEBANK_E2E") != "1" {
+		t.Skip("set PAVEBANK_E2E=1 with temporal server start-dev and encore run already running")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+	defer cancel()
+
+	client := NewClient("")
+	preflight(t, ctx, client)
+
+	runID := strconv.FormatInt(time.Now().UnixNano(), 36)
+	clientA := "e2e-list-a-" + runID
+	clientB := "e2e-list-b-" + runID
+	fixtures := []listBillFixture{
+		{
+			ClientID: clientA,
+			Currency: "USD",
+			Period:   "2099-01",
+			Status:   "CLOSED",
+			Items:    []string{"1000", "-100"},
+		},
+		{
+			ClientID: clientA,
+			Currency: "USD",
+			Period:   "2099-02",
+			Status:   "OPEN",
+			Items:    []string{"250"},
+		},
+		{
+			ClientID: clientA,
+			Currency: "GEL",
+			Period:   "2099-01",
+			Status:   "OPEN",
+			Items:    []string{"700", "300"},
+		},
+		{
+			ClientID: clientA,
+			Currency: "GEL",
+			Period:   "2099-02",
+			Status:   "CLOSED",
+		},
+		{
+			ClientID: clientA,
+			Currency: "USD",
+			Period:   "2099-03",
+			Status:   "CLOSED",
+			Items:    []string{"5000"},
+		},
+		{
+			ClientID: clientA,
+			Currency: "GEL",
+			Period:   "2099-03",
+			Status:   "OPEN",
+			Items:    []string{"-50", "200", "25"},
+		},
+		{
+			ClientID: clientB,
+			Currency: "USD",
+			Period:   "2099-01",
+			Status:   "OPEN",
+			Items:    []string{"333"},
+		},
+		{
+			ClientID: clientB,
+			Currency: "GEL",
+			Period:   "2099-02",
+			Status:   "CLOSED",
+			Items:    []string{"444", "56"},
+		},
+	}
+
+	expected := make(map[string]BillResource, len(fixtures))
+	for i := range fixtures {
+		createListBillFixture(t, ctx, client, runID, &fixtures[i])
+		expected[fixtures[i].BillID] = BillResource{
+			BillID:           fixtures[i].BillID,
+			ClientID:         fixtures[i].ClientID,
+			Currency:         fixtures[i].Currency,
+			Period:           fixtures[i].Period,
+			Status:           fixtures[i].Status,
+			TotalMinorAmount: fixtures[i].TotalMinorAmount,
+			ItemCount:        len(fixtures[i].Items),
+		}
+	}
+
+	t.Run("filter combinations", func(t *testing.T) {
+		tests := []struct {
+			name   string
+			params ListBillsParams
+			want   []string
+		}{
+			{
+				name:   "client A",
+				params: ListBillsParams{ClientID: clientA, Limit: 50},
+				want:   billIDsForFixtures(fixtures, clientA, "", "", ""),
+			},
+			{
+				name:   "client A open",
+				params: ListBillsParams{ClientID: clientA, Status: "OPEN", Limit: 50},
+				want:   billIDsForFixtures(fixtures, clientA, "OPEN", "", ""),
+			},
+			{
+				name:   "client A closed",
+				params: ListBillsParams{ClientID: clientA, Status: "CLOSED", Limit: 50},
+				want:   billIDsForFixtures(fixtures, clientA, "CLOSED", "", ""),
+			},
+			{
+				name:   "client A USD",
+				params: ListBillsParams{ClientID: clientA, Currency: "USD", Limit: 50},
+				want:   billIDsForFixtures(fixtures, clientA, "", "USD", ""),
+			},
+			{
+				name:   "client A open GEL",
+				params: ListBillsParams{ClientID: clientA, Status: "OPEN", Currency: "GEL", Limit: 50},
+				want:   billIDsForFixtures(fixtures, clientA, "OPEN", "GEL", ""),
+			},
+			{
+				name:   "client A period",
+				params: ListBillsParams{ClientID: clientA, Period: "2099-01", Limit: 50},
+				want:   billIDsForFixtures(fixtures, clientA, "", "", "2099-01"),
+			},
+			{
+				name:   "client A closed USD period",
+				params: ListBillsParams{ClientID: clientA, Status: "CLOSED", Currency: "USD", Period: "2099-03", Limit: 50},
+				want:   billIDsForFixtures(fixtures, clientA, "CLOSED", "USD", "2099-03"),
+			},
+			{
+				name:   "client B USD",
+				params: ListBillsParams{ClientID: clientB, Currency: "USD", Limit: 50},
+				want:   billIDsForFixtures(fixtures, clientB, "", "USD", ""),
+			},
+		}
+
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				resp, err := client.ListBills(ctx, tt.params)
+				requireNoClientError(t, err)
+				requireStatus(t, resp, http.StatusOK)
+				if resp.Body == nil {
+					t.Fatal("expected list body")
+				}
+				assertListBillsExact(t, resp.Body.Bills, tt.want, expected)
+			})
+		}
+	})
+
+	t.Run("cursor pagination", func(t *testing.T) {
+		var all []BillResource
+		cursor := ""
+		for page := 1; page <= 3; page++ {
+			resp, err := client.ListBills(ctx, ListBillsParams{
+				ClientID: clientA,
+				Cursor:   cursor,
+				Limit:    2,
+			})
+			requireNoClientError(t, err)
+			requireStatus(t, resp, http.StatusOK)
+			if resp.Body == nil {
+				t.Fatalf("page %d expected list body", page)
+			}
+			if len(resp.Body.Bills) != 2 {
+				t.Fatalf("page %d bills length = %d, want 2: %#v", page, len(resp.Body.Bills), resp.Body.Bills)
+			}
+
+			wantHasMore := page < 3
+			if resp.Body.HasMore != wantHasMore {
+				t.Fatalf("page %d hasMore = %v, want %v", page, resp.Body.HasMore, wantHasMore)
+			}
+			if wantHasMore && resp.Body.NextCursor == "" {
+				t.Fatalf("page %d nextCursor is empty, want cursor", page)
+			}
+			if !wantHasMore && resp.Body.NextCursor != "" {
+				t.Fatalf("page %d nextCursor = %q, want empty", page, resp.Body.NextCursor)
+			}
+
+			all = append(all, resp.Body.Bills...)
+			cursor = resp.Body.NextCursor
+		}
+		assertListBillsExact(t, all, billIDsForFixtures(fixtures, clientA, "", "", ""), expected)
 	})
 }
 
@@ -333,4 +537,143 @@ func containsBillWithTotal(bills []BillResource, billID, totalMinorAmount string
 		}
 	}
 	return false
+}
+
+type listBillFixture struct {
+	ClientID         string
+	Currency         string
+	Period           string
+	Status           string
+	Items            []string
+	BillID           string
+	TotalMinorAmount string
+}
+
+func createListBillFixture(t *testing.T, ctx context.Context, client *Client, runID string, fixture *listBillFixture) {
+	t.Helper()
+
+	resp, err := client.OpenBill(ctx, OpenBillRequest{
+		ClientID: fixture.ClientID,
+		Currency: fixture.Currency,
+		Period:   fixture.Period,
+	})
+	requireNoClientError(t, err)
+	requireStatus(t, resp, http.StatusCreated)
+	if resp.Body == nil {
+		t.Fatal("expected opened bill body")
+	}
+	fixture.BillID = resp.Body.BillID
+	fixture.TotalMinorAmount = "0"
+
+	var total int64
+	for i, amount := range fixture.Items {
+		item := LineItemRequest{
+			Reference:   fmt.Sprintf("list-%s-%s-%02d", runID, fixture.BillID, i+1),
+			MinorAmount: amount,
+			Currency:    fixture.Currency,
+			FeeType:     "e2e_list",
+			Description: "ListBills E2E fixture item",
+		}
+		itemResp, err := client.AddLineItem(ctx, fixture.BillID, item)
+		requireNoClientError(t, err)
+		requireStatus(t, itemResp, http.StatusCreated)
+		if itemResp.Body == nil {
+			t.Fatal("expected line item result body")
+		}
+		if !itemResp.Body.Applied {
+			t.Fatalf("fresh fixture item %q was not applied", item.Reference)
+		}
+
+		parsed, err := strconv.ParseInt(amount, 10, 64)
+		if err != nil {
+			t.Fatalf("invalid fixture amount %q: %v", amount, err)
+		}
+		total += parsed
+	}
+	fixture.TotalMinorAmount = strconv.FormatInt(total, 10)
+
+	if fixture.Status == "CLOSED" {
+		closeResp, err := client.CloseBill(ctx, fixture.BillID, CloseBillRequest{Reason: "e2e-list-fixture-close"})
+		requireNoClientError(t, err)
+		requireStatus(t, closeResp, http.StatusOK)
+		if closeResp.Body == nil {
+			t.Fatal("expected closed bill body")
+		}
+		if closeResp.Body.Status != "CLOSED" {
+			t.Fatalf("closed fixture status = %q, want CLOSED", closeResp.Body.Status)
+		}
+	}
+}
+
+func billIDsForFixtures(fixtures []listBillFixture, clientID, status, currency, period string) []string {
+	var ids []string
+	for _, fixture := range fixtures {
+		if clientID != "" && fixture.ClientID != clientID {
+			continue
+		}
+		if status != "" && fixture.Status != status {
+			continue
+		}
+		if currency != "" && fixture.Currency != currency {
+			continue
+		}
+		if period != "" && fixture.Period != period {
+			continue
+		}
+		ids = append(ids, fixture.BillID)
+	}
+	return ids
+}
+
+func assertListBillsExact(t *testing.T, got []BillResource, wantIDs []string, expected map[string]BillResource) {
+	t.Helper()
+
+	gotByID := make(map[string]BillResource, len(got))
+	for _, bill := range got {
+		if _, exists := gotByID[bill.BillID]; exists {
+			t.Fatalf("bill %q appeared more than once in list response: %#v", bill.BillID, got)
+		}
+		gotByID[bill.BillID] = bill
+		if len(bill.LineItems) != 0 {
+			t.Fatalf("list response included lineItems for bill %q: %#v", bill.BillID, bill.LineItems)
+		}
+	}
+
+	if len(gotByID) != len(wantIDs) {
+		t.Fatalf("listed bill count = %d, want %d; got=%v want=%v", len(gotByID), len(wantIDs), sortedBillIDs(gotByID), sortedStrings(wantIDs))
+	}
+	for _, wantID := range wantIDs {
+		want, ok := expected[wantID]
+		if !ok {
+			t.Fatalf("test fixture missing expected facts for bill %q", wantID)
+		}
+		got, ok := gotByID[wantID]
+		if !ok {
+			t.Fatalf("list response missing bill %q; got=%v", wantID, sortedBillIDs(gotByID))
+		}
+		if got.ClientID != want.ClientID ||
+			got.Currency != want.Currency ||
+			got.Period != want.Period ||
+			got.Status != want.Status ||
+			got.TotalMinorAmount != want.TotalMinorAmount ||
+			got.ItemCount != want.ItemCount {
+			t.Fatalf("bill %q facts = %#v, want client=%q currency=%q period=%q status=%q total=%q itemCount=%d",
+				wantID, got, want.ClientID, want.Currency, want.Period, want.Status, want.TotalMinorAmount, want.ItemCount)
+		}
+	}
+}
+
+func sortedBillIDs(bills map[string]BillResource) []string {
+	ids := make([]string, 0, len(bills))
+	for id := range bills {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+func sortedStrings(values []string) []string {
+	out := append([]string(nil), values...)
+	sort.Strings(out)
+	return out
 }

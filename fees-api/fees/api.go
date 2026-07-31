@@ -49,16 +49,18 @@ type InvoiceResource struct {
 }
 
 type GetBillResponse struct {
-	BillID           string             `json:"billId"`
-	ClientID         string             `json:"clientId"`
-	Currency         string             `json:"currency"`
-	Period           string             `json:"period"`
-	Status           string             `json:"status"`
-	TotalMinorAmount string             `json:"totalMinorAmount"`
-	ItemCount        int                `json:"itemCount"`
-	OpenedAt         time.Time          `json:"openedAt"`
-	ClosedAt         *time.Time         `json:"closedAt"`
-	LineItems        []LineItemResource `json:"lineItems,omitempty"`
+	BillID           string              `json:"billId"`
+	ClientID         string              `json:"clientId"`
+	Currency         string              `json:"currency"`
+	Period           string              `json:"period"`
+	Status           string              `json:"status"`
+	TotalMinorAmount string              `json:"totalMinorAmount"`
+	ItemCount        int                 `json:"itemCount"`
+	OpenedAt         time.Time           `json:"openedAt"`
+	ClosedAt         *time.Time          `json:"closedAt"`
+	LineItems        *[]LineItemResource `json:"lineItems,omitempty"`
+	NextCursor       *string             `json:"nextCursor,omitempty"`
+	HasMore          *bool               `json:"hasMore,omitempty"`
 }
 
 type LineItemResource struct {
@@ -109,7 +111,9 @@ type CloseBillRequest struct {
 }
 
 type GetBillRequest struct {
-	IncludeLineItems bool `query:"includeLineItems"`
+	IncludeLineItems bool               `query:"includeLineItems"`
+	Cursor           string             `query:"cursor"`
+	Limit            option.Option[int] `query:"limit"`
 }
 
 type ListBillsRequest struct {
@@ -305,17 +309,20 @@ func (s *Service) GetBill(ctx context.Context, billId string, req *GetBillReques
 	if id == "" {
 		return nil, apiError(errs.InvalidArgument, "invalid-request", "billId is required")
 	}
-	includeLineItems := false
-	if req != nil {
-		includeLineItems = req.IncludeLineItems
+	opts, err := parseGetBillOptions(req)
+	if err != nil {
+		return nil, err
 	}
 
-	if includeLineItems {
-		resource, err := readBillWithLineItemsResource(ctx, id)
+	if opts.IncludeLineItems {
+		resource, err := readBillWithLineItemsPageResource(ctx, id, opts)
 		if err != nil {
+			if errors.Is(err, errInvalidCursor) {
+				return nil, apiError(errs.InvalidArgument, "invalid-request", "cursor is invalid")
+			}
 			return nil, readBillError(id, err)
 		}
-		return getBillResponseFromInvoice(resource), nil
+		return getBillResponseFromLineItemsPage(resource), nil
 	}
 
 	resource, err := readBillResource(ctx, id)
@@ -424,6 +431,35 @@ func parseListBillsOptions(req *ListBillsRequest) (listBillsOptions, error) {
 	return opts, nil
 }
 
+func parseGetBillOptions(req *GetBillRequest) (getBillOptions, error) {
+	if req == nil {
+		return getBillOptions{}, nil
+	}
+	opts := getBillOptions{
+		IncludeLineItems: req.IncludeLineItems,
+		Cursor:           req.Cursor,
+	}
+	limit, hasLimit := req.Limit.Get()
+	if !opts.IncludeLineItems {
+		if opts.Cursor != "" || hasLimit {
+			return getBillOptions{}, apiError(errs.InvalidArgument, "invalid-request", "cursor and limit require includeLineItems=true")
+		}
+		return opts, nil
+	}
+	if !hasLimit {
+		opts.Limit = defaultLineItemsLimit
+		return opts, nil
+	}
+	if limit <= 0 {
+		return getBillOptions{}, apiError(errs.InvalidArgument, "invalid-request", "limit must be a positive integer")
+	}
+	if limit > maxLineItemsLimit {
+		limit = maxLineItemsLimit
+	}
+	opts.Limit = limit
+	return opts, nil
+}
+
 func openTemporalError(err error) error {
 	if temporal.IsWorkflowExecutionAlreadyStartedError(err) {
 		return apiError(errs.AlreadyExists, "bill-already-open", "bill workflow already exists")
@@ -524,18 +560,23 @@ func getBillResponseFromBill(resource *BillResource) *GetBillResponse {
 	}
 }
 
-func getBillResponseFromInvoice(resource *InvoiceResource) *GetBillResponse {
+func getBillResponseFromLineItemsPage(resource *billLineItemsPageResource) *GetBillResponse {
+	items := resource.LineItems
+	nextCursor := resource.NextCursor
+	hasMore := resource.HasMore
 	return &GetBillResponse{
-		BillID:           resource.BillID,
-		ClientID:         resource.ClientID,
-		Currency:         resource.Currency,
-		Period:           resource.Period,
-		Status:           resource.Status,
-		TotalMinorAmount: resource.TotalMinorAmount,
-		ItemCount:        resource.ItemCount,
-		OpenedAt:         resource.OpenedAt,
-		ClosedAt:         resource.ClosedAt,
-		LineItems:        resource.LineItems,
+		BillID:           resource.Bill.BillID,
+		ClientID:         resource.Bill.ClientID,
+		Currency:         resource.Bill.Currency,
+		Period:           resource.Bill.Period,
+		Status:           resource.Bill.Status,
+		TotalMinorAmount: resource.Bill.TotalMinorAmount,
+		ItemCount:        resource.Bill.ItemCount,
+		OpenedAt:         resource.Bill.OpenedAt,
+		ClosedAt:         resource.Bill.ClosedAt,
+		LineItems:        &items,
+		NextCursor:       &nextCursor,
+		HasMore:          &hasMore,
 	}
 }
 

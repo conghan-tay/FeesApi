@@ -62,6 +62,7 @@ func TestLedgerSchemaConstraintsAndIndexes(t *testing.T) {
 	assertIndexExists(t, ctx, "idx_bills_period")
 	assertIndexExists(t, ctx, "idx_bills_currency")
 	assertIndexExists(t, ctx, "idx_line_items_bill")
+	assertIndexExists(t, ctx, "idx_line_items_bill_id")
 }
 
 func TestCurrenciesSeedRows(t *testing.T) {
