@@ -165,6 +165,11 @@ func TestFeesLifecycleE2E(t *testing.T) {
 		if len(closedBody.LineItems) != len(items) {
 			t.Fatalf("lineItems length = %d, want %d", len(closedBody.LineItems), len(items))
 		}
+		for _, item := range closedBody.LineItems {
+			if item.Status != "FINALIZED" {
+				t.Fatalf("closed line item %s status = %q, want FINALIZED", item.Reference, item.Status)
+			}
+		}
 	})
 
 	t.Run("add after close is rejected", func(t *testing.T) {
@@ -198,6 +203,11 @@ func TestFeesLifecycleE2E(t *testing.T) {
 		}
 		if len(getResp.Body.LineItems) != len(items) {
 			t.Fatalf("GET lineItems length = %d, want %d", len(getResp.Body.LineItems), len(items))
+		}
+		for _, item := range getResp.Body.LineItems {
+			if item.Status != "FINALIZED" {
+				t.Fatalf("GET line item %s status = %q, want FINALIZED", item.Reference, item.Status)
+			}
 		}
 
 		listResp, err := client.ListBills(ctx, ListBillsParams{

@@ -61,6 +61,9 @@ CREATE TABLE line_items (
     currency      CHAR(3)     NOT NULL,        -- must equal bills.currency; stored for audit legibility
     fee_type      TEXT        NOT NULL,
     description   TEXT        NOT NULL DEFAULT '',
+    status        TEXT        NOT NULL         -- 'PENDING' | 'FINALIZED' | 'FAILED'
+                  CONSTRAINT line_items_status_check
+                  CHECK (status IN ('PENDING', 'FINALIZED', 'FAILED')),
     applied_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
 
     UNIQUE (bill_id, reference)                -- ← the real idempotency guard
@@ -81,7 +84,7 @@ CREATE INDEX idx_line_items_bill ON line_items (bill_id);
 
 **`amount_minor` has no `CHECK (>= 0)`.** Corrections are modeled as separate *credit* line items with negative amounts (append-only; the ledger is never mutated). A non-negativity check would block that correction mechanism.
 
-**No `status` on line items.** They're append-only facts — a persisted row *is* an accepted accrual. Nothing to mutate.
+**Line-item `status` is explicit and required.** It is constrained to `PENDING`, `FINALIZED`, or `FAILED` and has no database default, so every persistence path must choose deliberately. `ActivityPersistLineItem` writes `FINALIZED` for now. Itemized API reads expose the stored value, and totals/counts currently include rows in all three statuses.
 
 ### Index rationale (LIST — FR7: filter by client, status, currency, period)
 
@@ -132,13 +135,13 @@ func temporalNonRetryable(err error) error {
 
 ### 2.1 `ActivityPersistLineItem`
 
-Insert one line item. That's the whole write — there is no bill-row total to bump, because the total is computed on read (`SUM` over `line_items`). So this Activity is a **single idempotent `INSERT`**, not a two-statement transaction. A duplicate `(bill_id, reference)` hits `ON CONFLICT DO NOTHING` and is a no-op success, so at-least-once retries never double-insert — and because nothing is summed at write time, a duplicate cannot double-count a total either.
+Insert one line item with status `FINALIZED`. That's the whole write — there is no bill-row total to bump, because the total is computed on read (`SUM` over `line_items`). So this Activity is a **single idempotent `INSERT`**, not a two-statement transaction. A duplicate `(bill_id, reference)` hits `ON CONFLICT DO NOTHING` and is a no-op success, so at-least-once retries never double-insert — and because nothing is summed at write time, a duplicate cannot double-count a total either.
 
 **The closed-bill guard, and the ambiguity it introduces.** "Don't accept a new item on a sealed bill" is a lifecycle rule, not something a unique constraint expresses. The workflow's `acceptsAccruals()` check is the authoritative guard (and the workflow is single-writer on close, so it can't race itself). We *also* enforce it at the DB as a backstop, by making the insert conditional on the bill being `OPEN`:
 
 ```sql
-INSERT INTO line_items (bill_id, reference, amount_minor, currency, fee_type, description)
-SELECT $1, $2, $3, $4, $5, $6
+INSERT INTO line_items (bill_id, reference, amount_minor, currency, fee_type, description, status)
+SELECT $1, $2, $3, $4, $5, $6, 'FINALIZED'
  WHERE EXISTS (SELECT 1 FROM bills WHERE bill_id = $1 AND status = 'OPEN')
 ON CONFLICT (bill_id, reference) DO NOTHING
 ```
@@ -175,8 +178,8 @@ func (a *Activities) ActivityPersistLineItem(ctx context.Context, row LedgerRow)
 	// is the durable backstop for the same rule (a rule a unique constraint can't express).
 	tag, err := a.db.Exec(ctx, `
 		INSERT INTO line_items
-			(bill_id, reference, amount_minor, currency, fee_type, description)
-		SELECT $1, $2, $3, $4, $5, $6
+			(bill_id, reference, amount_minor, currency, fee_type, description, status)
+		SELECT $1, $2, $3, $4, $5, $6, 'FINALIZED'
 		 WHERE EXISTS (SELECT 1 FROM bills WHERE bill_id = $1 AND status = 'OPEN')
 		ON CONFLICT (bill_id, reference) DO NOTHING`,
 		row.BillID, row.Reference, row.AmountMinor,

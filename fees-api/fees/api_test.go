@@ -113,6 +113,67 @@ func TestGetBillWithLineItemsIncludesOrderedItems(t *testing.T) {
 	if invoice.LineItems[0].Reference != "ref-get-items-001" || invoice.LineItems[1].Reference != "ref-get-items-002" {
 		t.Fatalf("line item order = %#v, want insertion order", invoice.LineItems)
 	}
+	for _, item := range invoice.LineItems {
+		if item.Status != "FINALIZED" {
+			t.Fatalf("line item %s status = %q, want FINALIZED", item.Reference, item.Status)
+		}
+	}
+}
+
+func TestLineItemStatusesAreExposedAndAllContributeToAggregates(t *testing.T) {
+	ctx := context.Background()
+	clientID := "api-line-statuses"
+	billID := "bill-api-line-statuses-USD-2099-01"
+	cleanupActivityBill(t, ctx, billID)
+	seedActivityBill(t, ctx, billID, clientID, "USD", "2099-01", "OPEN", nil)
+
+	items := []struct {
+		reference   string
+		amountMinor int64
+		status      string
+	}{
+		{reference: "ref-status-pending", amountMinor: 100, status: "PENDING"},
+		{reference: "ref-status-finalized", amountMinor: 200, status: "FINALIZED"},
+		{reference: "ref-status-failed", amountMinor: -50, status: "FAILED"},
+	}
+	for _, item := range items {
+		seedAPILineItemWithStatus(t, ctx, billID, item.reference, item.amountMinor, "USD", "status_test", item.status, item.status)
+	}
+
+	summaryResp := performGetBill(t, &Service{}, billID, "")
+	if summaryResp.Code != http.StatusOK {
+		t.Fatalf("summary status = %d, want 200. Body: %s", summaryResp.Code, summaryResp.Body.String())
+	}
+	var summary BillResource
+	if err := json.Unmarshal(summaryResp.Body.Bytes(), &summary); err != nil {
+		t.Fatalf("decode summary response: %v", err)
+	}
+	if summary.TotalMinorAmount != "250" || summary.ItemCount != 3 {
+		t.Fatalf("summary total/count = %s/%d, want 250/3", summary.TotalMinorAmount, summary.ItemCount)
+	}
+
+	detailResp := performGetBill(t, &Service{}, billID, "true")
+	if detailResp.Code != http.StatusOK {
+		t.Fatalf("detail status = %d, want 200. Body: %s", detailResp.Code, detailResp.Body.String())
+	}
+	detail := decodeInvoiceResource(t, detailResp)
+	if detail.TotalMinorAmount != "250" || detail.ItemCount != 3 || len(detail.LineItems) != 3 {
+		t.Fatalf("detail total/count/items = %s/%d/%d, want 250/3/3", detail.TotalMinorAmount, detail.ItemCount, len(detail.LineItems))
+	}
+	for i, item := range items {
+		if detail.LineItems[i].Reference != item.reference || detail.LineItems[i].Status != item.status {
+			t.Fatalf("detail line item %d = %#v, want reference/status %s/%s", i, detail.LineItems[i], item.reference, item.status)
+		}
+	}
+
+	listResp := performListBills(t, &Service{}, url.Values{"clientId": []string{clientID}})
+	if listResp.Code != http.StatusOK {
+		t.Fatalf("list status = %d, want 200. Body: %s", listResp.Code, listResp.Body.String())
+	}
+	listed := decodeListBillsResponse(t, listResp)
+	if len(listed.Bills) != 1 || listed.Bills[0].TotalMinorAmount != "250" || listed.Bills[0].ItemCount != 3 {
+		t.Fatalf("listed bills = %#v, want one bill with total/count 250/3", listed.Bills)
+	}
 }
 
 func TestReadBillWithLineItemsResourceHasConsistentAggregates(t *testing.T) {
@@ -1547,17 +1608,23 @@ func decodeListBillsResponse(t *testing.T, resp *httptest.ResponseRecorder) List
 
 func seedAPILineItem(t *testing.T, ctx context.Context, billID, reference string, amountMinor int64, currency, feeType, description string) {
 	t.Helper()
+	seedAPILineItemWithStatus(t, ctx, billID, reference, amountMinor, currency, feeType, description, "FINALIZED")
+}
+
+func seedAPILineItemWithStatus(t *testing.T, ctx context.Context, billID, reference string, amountMinor int64, currency, feeType, description, status string) {
+	t.Helper()
 
 	_, err := db.Exec(ctx, `
 		INSERT INTO line_items
-			(bill_id, reference, amount_minor, currency, fee_type, description)
-		VALUES ($1, $2, $3, $4, $5, $6)`,
+			(bill_id, reference, amount_minor, currency, fee_type, description, status)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)`,
 		billID,
 		reference,
 		amountMinor,
 		currency,
 		feeType,
 		description,
+		status,
 	)
 	if err != nil {
 		t.Fatalf("seed line item %s/%s: %v", billID, reference, err)

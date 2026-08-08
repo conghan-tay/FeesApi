@@ -67,6 +67,7 @@ type LineItemResource struct {
 	Currency    string    `json:"currency"`
 	FeeType     string    `json:"feeType"`
 	Description string    `json:"description"`
+	Status      string    `json:"status"`
 	AppliedAt   time.Time `json:"appliedAt"`
 }
 
