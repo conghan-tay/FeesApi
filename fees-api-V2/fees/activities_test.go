@@ -85,6 +85,67 @@ func TestActivityPublishPendingRejectsMissingPublisher(t *testing.T) {
 	}
 }
 
+func TestActivityPublishFinalizedFormatsInt64AndPreservesPayload(t *testing.T) {
+	tests := []struct {
+		name   string
+		amount int64
+	}{
+		{name: "positive", amount: 1500},
+		{name: "zero", amount: 0},
+		{name: "negative", amount: -500},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			publisher := &recordingLineItemStatusPublisher{}
+			activities := &Activities{lineItemStatusClient: publisher}
+			row := LedgerRow{
+				BillID:      "bill-activity-finalized-USD-2099-01",
+				Reference:   "ref-finalized-" + tt.name,
+				AmountMinor: tt.amount,
+				Currency:    "USD",
+				FeeType:     "wire_transfer",
+				Description: "Outbound USD wire",
+			}
+
+			if err := activities.ActivityPublishFinalized(context.Background(), row); err != nil {
+				t.Fatalf("ActivityPublishFinalized returned error: %v", err)
+			}
+			if len(publisher.requests) != 1 {
+				t.Fatalf("publish requests = %d, want 1", len(publisher.requests))
+			}
+			got := publisher.requests[0]
+			if got.BillID != row.BillID || got.Reference != row.Reference || got.Currency != row.Currency || got.FeeType != row.FeeType || got.Description != row.Description {
+				t.Fatalf("published request = %#v, want row fields %#v", got, row)
+			}
+			if got.MinorAmount != strconv.FormatInt(tt.amount, 10) {
+				t.Fatalf("published minorAmount = %#v, want %d", got.MinorAmount, tt.amount)
+			}
+			if got.Status != charge.LineItemStatusFinalized {
+				t.Fatalf("published status = %q, want %q", got.Status, charge.LineItemStatusFinalized)
+			}
+		})
+	}
+}
+
+func TestActivityPublishFinalizedPropagatesPublisherFailure(t *testing.T) {
+	publishErr := errors.New("charge callback unavailable")
+	publisher := &recordingLineItemStatusPublisher{err: publishErr}
+	activities := &Activities{lineItemStatusClient: publisher}
+
+	err := activities.ActivityPublishFinalized(context.Background(), LedgerRow{AmountMinor: 25})
+	if !errors.Is(err, publishErr) {
+		t.Fatalf("ActivityPublishFinalized error = %v, want wrapped %v", err, publishErr)
+	}
+}
+
+func TestActivityPublishFinalizedRejectsMissingPublisher(t *testing.T) {
+	err := (&Activities{}).ActivityPublishFinalized(context.Background(), LedgerRow{})
+	if err == nil {
+		t.Fatal("ActivityPublishFinalized returned nil error with no publisher")
+	}
+}
+
 func TestActivityPersistLineItemFreshInsertAndDuplicate(t *testing.T) {
 	ctx := context.Background()
 	activities := NewActivities(db)
