@@ -64,7 +64,7 @@ func TestRegisterActivities(t *testing.T) {
 	if _, ok := activityType.MethodByName("ActivityPersistBill"); ok {
 		t.Fatal("ActivityPersistBill remains registered")
 	}
-	for _, name := range []string{"ActivityPublishPending", "ActivityPersistLineItem", "ActivityPersistInvoice"} {
+	for _, name := range []string{"ActivityPublishPending", "ActivityPublishFinalized", "ActivityPersistLineItem", "ActivityPersistInvoice"} {
 		if _, ok := activityType.MethodByName(name); !ok {
 			t.Fatalf("%s is not available on registered Activities", name)
 		}

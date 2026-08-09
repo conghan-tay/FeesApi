@@ -153,6 +153,17 @@ func (h *lineItemSignalHandler) start(ctx workflow.Context, state *BillState, li
 			"reference", li.Reference,
 			"applied", applied,
 		)
+
+		if err := workflow.ExecuteActivity(publishCtx, ActivityPublishFinalized, row).
+			Get(publishCtx, nil); err != nil {
+			workflow.GetLogger(ctx).Error(
+				"publish finalized line item status failed",
+				"billID", id,
+				"reference", li.Reference,
+				"err", err,
+			)
+			return
+		}
 	})
 }
 

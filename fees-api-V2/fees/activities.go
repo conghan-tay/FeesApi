@@ -12,9 +12,10 @@ import (
 )
 
 const (
-	ActivityPublishPending  = "ActivityPublishPending"
-	ActivityPersistLineItem = "ActivityPersistLineItem"
-	ActivityPersistInvoice  = "ActivityPersistInvoice"
+	ActivityPublishPending   = "ActivityPublishPending"
+	ActivityPublishFinalized = "ActivityPublishFinalized"
+	ActivityPersistLineItem  = "ActivityPersistLineItem"
+	ActivityPersistInvoice   = "ActivityPersistInvoice"
 )
 
 type lineItemStatusPublisher interface {
@@ -58,6 +59,25 @@ func (a *Activities) ActivityPublishPending(ctx context.Context, row LedgerRow) 
 		Status:      charge.LineItemStatusPending,
 	}); err != nil {
 		return fmt.Errorf("publish pending line item status: %w", err)
+	}
+	return nil
+}
+
+func (a *Activities) ActivityPublishFinalized(ctx context.Context, row LedgerRow) error {
+	if a == nil || a.lineItemStatusClient == nil {
+		return errors.New("publish finalized line item status: charge client is not configured")
+	}
+
+	if err := a.lineItemStatusClient.PublishLineItemStatus(ctx, &charge.PublishLineItemStatusRequest{
+		BillID:      row.BillID,
+		Reference:   row.Reference,
+		MinorAmount: strconv.FormatInt(row.AmountMinor, 10),
+		Currency:    row.Currency,
+		FeeType:     row.FeeType,
+		Description: row.Description,
+		Status:      charge.LineItemStatusFinalized,
+	}); err != nil {
+		return fmt.Errorf("publish finalized line item status: %w", err)
 	}
 	return nil
 }
