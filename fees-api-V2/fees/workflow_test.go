@@ -3,6 +3,7 @@ package fees
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -143,6 +144,8 @@ func TestBillWorkflowProcessesSignalsConcurrentlyAndDrainsBeforeSeal(t *testing.
 	second := testLineItem("ref-concurrent-2", "USD")
 	firstRow := testLedgerRow(in, first)
 	secondRow := testLedgerRow(in, second)
+	var invoiceStarted atomic.Bool
+	var drainChecked atomic.Bool
 
 	firstCall := env.OnActivity(ActivityPersistLineItem, mock.Anything, firstRow).
 		After(time.Hour).
@@ -153,6 +156,9 @@ func TestBillWorkflowProcessesSignalsConcurrentlyAndDrainsBeforeSeal(t *testing.
 		Return(true, nil).
 		Once()
 	env.OnActivity(ActivityPersistInvoice, mock.Anything, firstRow.BillID).
+		Run(func(mock.Arguments) {
+			invoiceStarted.Store(true)
+		}).
 		Return(testClosedBillView(in), nil).
 		NotBefore(firstCall, secondCall).
 		Once()
@@ -164,9 +170,21 @@ func TestBillWorkflowProcessesSignalsConcurrentlyAndDrainsBeforeSeal(t *testing.
 	env.RegisterDelayedCallback(func() {
 		env.SignalWorkflow(SignalCloseBill, CloseSignal{Reason: "close-with-concurrent-signals"})
 	}, time.Minute)
+	env.RegisterDelayedCallback(func() {
+		drainChecked.Store(true)
+		if invoiceStarted.Load() {
+			t.Error("ActivityPersistInvoice started while line-item activities were still in flight")
+		}
+	}, 30*time.Minute)
 
 	env.ExecuteWorkflow(BillWorkflow, in)
 	assertBillWorkflowCompleted(t, env)
+	if !drainChecked.Load() {
+		t.Fatal("mid-drain assertion did not run")
+	}
+	if !invoiceStarted.Load() {
+		t.Fatal("ActivityPersistInvoice did not start after line-item activities completed")
+	}
 	env.AssertExpectations(t)
 }
 
