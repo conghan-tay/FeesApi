@@ -5,25 +5,61 @@ import (
 	"errors"
 	"fmt"
 
+	"encore.app/charge"
 	"encore.dev/storage/sqldb"
 	"go.temporal.io/sdk/temporal"
 )
 
 const (
+	ActivityPublishPending  = "ActivityPublishPending"
 	ActivityPersistLineItem = "ActivityPersistLineItem"
 	ActivityPersistInvoice  = "ActivityPersistInvoice"
 )
 
+type lineItemStatusPublisher interface {
+	PublishLineItemStatus(context.Context, *charge.PublishLineItemStatusRequest) error
+}
+
+type encoreLineItemStatusPublisher struct{}
+
+func (encoreLineItemStatusPublisher) PublishLineItemStatus(ctx context.Context, req *charge.PublishLineItemStatusRequest) error {
+	return charge.PublishLineItemStatus(ctx, req)
+}
+
 type Activities struct {
-	db *sqldb.Database
+	db                   *sqldb.Database
+	lineItemStatusClient lineItemStatusPublisher
 }
 
 func NewActivities(db *sqldb.Database) *Activities {
-	return &Activities{db: db}
+	return &Activities{
+		db:                   db,
+		lineItemStatusClient: encoreLineItemStatusPublisher{},
+	}
 }
 
 func temporalNonRetryable(err error) error {
 	return temporal.NewNonRetryableApplicationError(err.Error(), "BillNotOpen", err)
+}
+
+func (a *Activities) ActivityPublishPending(ctx context.Context, row LedgerRow) error {
+	if a == nil || a.lineItemStatusClient == nil {
+		return errors.New("publish pending line item status: charge client is not configured")
+	}
+
+	amountMinor := row.AmountMinor
+	if err := a.lineItemStatusClient.PublishLineItemStatus(ctx, &charge.PublishLineItemStatusRequest{
+		BillID:      row.BillID,
+		Reference:   row.Reference,
+		MinorAmount: &amountMinor,
+		Currency:    row.Currency,
+		FeeType:     row.FeeType,
+		Description: row.Description,
+		Status:      charge.LineItemStatusPending,
+	}); err != nil {
+		return fmt.Errorf("publish pending line item status: %w", err)
+	}
+	return nil
 }
 
 func (a *Activities) ActivityPersistLineItem(ctx context.Context, row LedgerRow) (bool, error) {

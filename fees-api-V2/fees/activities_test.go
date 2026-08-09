@@ -7,8 +7,87 @@ import (
 	"testing"
 	"time"
 
+	"encore.app/charge"
 	"go.temporal.io/sdk/temporal"
 )
+
+type recordingLineItemStatusPublisher struct {
+	err      error
+	requests []charge.PublishLineItemStatusRequest
+}
+
+func (p *recordingLineItemStatusPublisher) PublishLineItemStatus(_ context.Context, req *charge.PublishLineItemStatusRequest) error {
+	if req != nil {
+		copied := *req
+		if req.MinorAmount != nil {
+			amount := *req.MinorAmount
+			copied.MinorAmount = &amount
+		}
+		p.requests = append(p.requests, copied)
+	}
+	return p.err
+}
+
+func TestActivityPublishPendingPreservesInt64AndPayload(t *testing.T) {
+	tests := []struct {
+		name   string
+		amount int64
+	}{
+		{name: "positive", amount: 1500},
+		{name: "zero", amount: 0},
+		{name: "negative", amount: -500},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			publisher := &recordingLineItemStatusPublisher{}
+			activities := &Activities{lineItemStatusClient: publisher}
+			row := LedgerRow{
+				BillID:      "bill-activity-pending-USD-2099-01",
+				Reference:   "ref-pending-" + tt.name,
+				AmountMinor: tt.amount,
+				Currency:    "USD",
+				FeeType:     "wire_transfer",
+				Description: "Outbound USD wire",
+			}
+
+			if err := activities.ActivityPublishPending(context.Background(), row); err != nil {
+				t.Fatalf("ActivityPublishPending returned error: %v", err)
+			}
+			if len(publisher.requests) != 1 {
+				t.Fatalf("publish requests = %d, want 1", len(publisher.requests))
+			}
+			got := publisher.requests[0]
+			if got.BillID != row.BillID || got.Reference != row.Reference || got.Currency != row.Currency || got.FeeType != row.FeeType || got.Description != row.Description {
+				t.Fatalf("published request = %#v, want row fields %#v", got, row)
+			}
+			if got.MinorAmount == nil || *got.MinorAmount != tt.amount {
+				t.Fatalf("published minorAmount = %#v, want %d", got.MinorAmount, tt.amount)
+			}
+			if got.Status != charge.LineItemStatusPending {
+				t.Fatalf("published status = %q, want %q", got.Status, charge.LineItemStatusPending)
+			}
+		})
+	}
+}
+
+func TestActivityPublishPendingPropagatesPublisherFailure(t *testing.T) {
+	publishErr := errors.New("charge callback unavailable")
+	publisher := &recordingLineItemStatusPublisher{err: publishErr}
+	activities := &Activities{lineItemStatusClient: publisher}
+
+	err := activities.ActivityPublishPending(context.Background(), LedgerRow{AmountMinor: 25})
+	if !errors.Is(err, publishErr) {
+		t.Fatalf("ActivityPublishPending error = %v, want wrapped %v", err, publishErr)
+	}
+}
+
+func TestActivityPublishPendingRejectsMissingPublisher(t *testing.T) {
+	err := (&Activities{}).ActivityPublishPending(context.Background(), LedgerRow{})
+	if err == nil {
+		t.Fatal("ActivityPublishPending returned nil error with no publisher")
+	}
+}
 
 func TestActivityPersistLineItemFreshInsertAndDuplicate(t *testing.T) {
 	ctx := context.Background()

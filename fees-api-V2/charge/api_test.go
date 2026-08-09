@@ -161,12 +161,121 @@ func TestAddLineItemNilTemporalClientReturns503(t *testing.T) {
 	assertProblem(t, resp, "add-line-item-unavailable", http.StatusServiceUnavailable)
 }
 
+func TestPublishLineItemStatusAcceptsSupportedStatusesAndNumericAmounts(t *testing.T) {
+	tests := []struct {
+		name   string
+		status string
+		amount int64
+	}{
+		{name: "pending positive", status: LineItemStatusPending, amount: 1500},
+		{name: "finalized zero", status: LineItemStatusFinalized, amount: 0},
+		{name: "failed negative", status: LineItemStatusFailed, amount: -500},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			temporalClient := &recordingTemporalClient{}
+			svc := &Service{temporalClient: temporalClient}
+			req := validPublishLineItemStatusRequest(tt.amount, tt.status)
+
+			resp := performPublishLineItemStatus(t, svc, &req)
+
+			if resp.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200. Body: %s", resp.Code, resp.Body.String())
+			}
+			if resp.Body.Len() != 0 {
+				t.Fatalf("response body = %q, want empty", resp.Body.String())
+			}
+			if len(temporalClient.signals) != 0 {
+				t.Fatalf("SignalWorkflow calls = %d, want 0", len(temporalClient.signals))
+			}
+		})
+	}
+}
+
+func TestPublishLineItemStatusValidationFailuresReturn400(t *testing.T) {
+	validAmount := int64(1500)
+	tests := []struct {
+		name string
+		body *PublishLineItemStatusRequest
+	}{
+		{name: "missing body", body: nil},
+		{name: "missing bill ID", body: &PublishLineItemStatusRequest{Reference: "ref", MinorAmount: &validAmount, Currency: "USD", FeeType: "wire", Status: LineItemStatusPending}},
+		{name: "missing reference", body: &PublishLineItemStatusRequest{BillID: "bill-acme-USD-2099-01", MinorAmount: &validAmount, Currency: "USD", FeeType: "wire", Status: LineItemStatusPending}},
+		{name: "missing minor amount", body: &PublishLineItemStatusRequest{BillID: "bill-acme-USD-2099-01", Reference: "ref", Currency: "USD", FeeType: "wire", Status: LineItemStatusPending}},
+		{name: "missing currency", body: &PublishLineItemStatusRequest{BillID: "bill-acme-USD-2099-01", Reference: "ref", MinorAmount: &validAmount, FeeType: "wire", Status: LineItemStatusPending}},
+		{name: "lowercase currency", body: &PublishLineItemStatusRequest{BillID: "bill-acme-USD-2099-01", Reference: "ref", MinorAmount: &validAmount, Currency: "usd", FeeType: "wire", Status: LineItemStatusPending}},
+		{name: "missing fee type", body: &PublishLineItemStatusRequest{BillID: "bill-acme-USD-2099-01", Reference: "ref", MinorAmount: &validAmount, Currency: "USD", Status: LineItemStatusPending}},
+		{name: "missing status", body: &PublishLineItemStatusRequest{BillID: "bill-acme-USD-2099-01", Reference: "ref", MinorAmount: &validAmount, Currency: "USD", FeeType: "wire"}},
+		{name: "lowercase status", body: &PublishLineItemStatusRequest{BillID: "bill-acme-USD-2099-01", Reference: "ref", MinorAmount: &validAmount, Currency: "USD", FeeType: "wire", Status: "pending"}},
+		{name: "unknown status", body: &PublishLineItemStatusRequest{BillID: "bill-acme-USD-2099-01", Reference: "ref", MinorAmount: &validAmount, Currency: "USD", FeeType: "wire", Status: "CANCELLED"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			temporalClient := &recordingTemporalClient{}
+			resp := performPublishLineItemStatus(t, &Service{temporalClient: temporalClient}, tt.body)
+
+			assertProblem(t, resp, "invalid-request", http.StatusBadRequest)
+			if len(temporalClient.signals) != 0 {
+				t.Fatalf("SignalWorkflow calls = %d, want 0", len(temporalClient.signals))
+			}
+		})
+	}
+}
+
+func TestPublishLineItemStatusMinorAmountJSONContract(t *testing.T) {
+	valid := validPublishLineItemStatusRequest(1500, LineItemStatusPending)
+	encoded, err := json.Marshal(valid)
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	if !strings.Contains(string(encoded), `"minorAmount":1500`) {
+		t.Fatalf("encoded request = %s, want numeric minorAmount", encoded)
+	}
+	if strings.Contains(string(encoded), `"minorAmount":"1500"`) {
+		t.Fatalf("encoded request = %s, minorAmount must not be a string", encoded)
+	}
+
+	validJSON := `{"billId":"bill-acme-USD-2099-01","reference":"ref","minorAmount":-500,"currency":"USD","feeType":"wire","description":"test","status":"PENDING"}`
+	var decoded PublishLineItemStatusRequest
+	if err := json.Unmarshal([]byte(validJSON), &decoded); err != nil {
+		t.Fatalf("decode numeric minorAmount: %v", err)
+	}
+	if decoded.MinorAmount == nil || *decoded.MinorAmount != -500 {
+		t.Fatalf("decoded minorAmount = %#v, want -500", decoded.MinorAmount)
+	}
+
+	for _, invalidJSON := range []string{
+		`{"minorAmount":"1500"}`,
+		`{"minorAmount":1.5}`,
+		`{"minorAmount":9223372036854775808}`,
+	} {
+		var req PublishLineItemStatusRequest
+		if err := json.Unmarshal([]byte(invalidJSON), &req); err == nil {
+			t.Fatalf("json.Unmarshal(%s) returned nil error", invalidJSON)
+		}
+	}
+}
+
 func validAddLineItemRequest() AddLineItemRequest {
 	return AddLineItemRequest{
 		Reference:   "ref-unavailable",
 		MinorAmount: "1500",
 		Currency:    "USD",
 		FeeType:     "wire_transfer",
+	}
+}
+
+func validPublishLineItemStatusRequest(amount int64, status string) PublishLineItemStatusRequest {
+	return PublishLineItemStatusRequest{
+		BillID:      "bill-acme-USD-2099-01",
+		Reference:   "ref-status",
+		MinorAmount: &amount,
+		Currency:    "USD",
+		FeeType:     "wire_transfer",
+		Description: "Outbound USD wire",
+		Status:      status,
 	}
 }
 
@@ -192,6 +301,18 @@ func performAddLineItemRequest(t *testing.T, svc *Service, billID string, body *
 	}{Reference: out.Reference, Applied: out.Applied}); err != nil {
 		t.Fatalf("encode response: %v", err)
 	}
+	return resp
+}
+
+func performPublishLineItemStatus(t *testing.T, svc *Service, body *PublishLineItemStatusRequest) *httptest.ResponseRecorder {
+	t.Helper()
+
+	resp := httptest.NewRecorder()
+	if err := svc.PublishLineItemStatus(context.Background(), body); err != nil {
+		errs.HTTPError(resp, err)
+		return resp
+	}
+	resp.WriteHeader(http.StatusOK)
 	return resp
 }
 
