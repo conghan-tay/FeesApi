@@ -4,6 +4,13 @@ fees-api/encore.gen/
 fees-api/encore.gen.cue
 fees-api/encore.gen.go
 fees-api/**/encore.gen.go
+
+fees-api-V2/.encore/
+fees-api-V2/encore.gen/
+fees-api-V2/encore.gen.cue
+fees-api-V2/encore.gen.go
+fees-api-V2/**/encore.gen.go
+
 *.test
 coverage.out
 *.coverprofile
