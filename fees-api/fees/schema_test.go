@@ -34,6 +34,8 @@ func TestLedgerSchemaTablesAndColumns(t *testing.T) {
 	assertColumn(t, lineItems, "currency", columnExpectation{dataType: "character", charLength: 3, nullable: false})
 	assertColumn(t, lineItems, "fee_type", columnExpectation{dataType: "text", nullable: false})
 	assertColumn(t, lineItems, "description", columnExpectation{dataType: "text", nullable: false, defaultContains: "''::text"})
+	assertColumn(t, lineItems, "status", columnExpectation{dataType: "text", nullable: false})
+	assertColumnHasNoDefault(t, lineItems, "status")
 	assertColumn(t, lineItems, "applied_at", columnExpectation{dataType: "timestamp with time zone", nullable: false, defaultContains: "now()"})
 
 	currencies := loadColumns(t, ctx, "currencies")
@@ -54,6 +56,7 @@ func TestLedgerSchemaConstraintsAndIndexes(t *testing.T) {
 	assertConstraint(t, lineItems, "p", "PRIMARY KEY (id)")
 	assertConstraint(t, lineItems, "u", "UNIQUE (bill_id, reference)")
 	assertConstraint(t, lineItems, "f", "FOREIGN KEY (bill_id)", "REFERENCES bills(bill_id)")
+	assertConstraint(t, lineItems, "c", "status", "PENDING", "FINALIZED", "FAILED")
 
 	currencies := loadConstraints(t, ctx, "currencies")
 	assertConstraint(t, currencies, "p", "PRIMARY KEY (code)")
@@ -135,8 +138,8 @@ func TestLedgerConstraintsRejectBadInserts(t *testing.T) {
 
 	// Orphan line_item is rejected by the FK.
 	_, err = db.Exec(ctx, `
-		INSERT INTO line_items (bill_id, reference, amount_minor, currency, fee_type)
-		VALUES ('bill-schema-guard-missing-USD-2099-01', 'schema-guard-orphan', 100, 'USD', 'wire_transfer')`)
+		INSERT INTO line_items (bill_id, reference, amount_minor, currency, fee_type, status)
+		VALUES ('bill-schema-guard-missing-USD-2099-01', 'schema-guard-orphan', 100, 'USD', 'wire_transfer', 'FINALIZED')`)
 	assertPgErrorCode(t, err, "23503")
 
 	// Setup one bill so the two uniqueness checks have a valid target.
@@ -156,16 +159,44 @@ func TestLedgerConstraintsRejectBadInserts(t *testing.T) {
 		VALUES ('bill-schema-guard-USD-2099-02-dup', 'schema-guard', 'USD', '2099-02')`)
 	assertPgErrorCode(t, err, "23505")
 
+	// Every supported line-item status is accepted.
+	for _, status := range []string{"PENDING", "FINALIZED", "FAILED"} {
+		if _, err := db.Exec(ctx, `
+			INSERT INTO line_items (bill_id, reference, amount_minor, currency, fee_type, status)
+			VALUES ('bill-schema-guard-USD-2099-02', $1, 100, 'USD', 'wire_transfer', $2)`,
+			"schema-guard-status-"+strings.ToLower(status),
+			status,
+		); err != nil {
+			t.Fatalf("insert line item with status %s: %v", status, err)
+		}
+	}
+
+	// Status is required and has no implicit default.
+	_, err = db.Exec(ctx, `
+		INSERT INTO line_items (bill_id, reference, amount_minor, currency, fee_type)
+		VALUES ('bill-schema-guard-USD-2099-02', 'schema-guard-status-omitted', 100, 'USD', 'wire_transfer')`)
+	assertPgErrorCode(t, err, "23502")
+
+	_, err = db.Exec(ctx, `
+		INSERT INTO line_items (bill_id, reference, amount_minor, currency, fee_type, status)
+		VALUES ('bill-schema-guard-USD-2099-02', 'schema-guard-status-null', 100, 'USD', 'wire_transfer', NULL)`)
+	assertPgErrorCode(t, err, "23502")
+
+	_, err = db.Exec(ctx, `
+		INSERT INTO line_items (bill_id, reference, amount_minor, currency, fee_type, status)
+		VALUES ('bill-schema-guard-USD-2099-02', 'schema-guard-status-invalid', 100, 'USD', 'wire_transfer', 'UNKNOWN')`)
+	assertPgErrorCode(t, err, "23514")
+
 	// Duplicate (bill_id, reference).
 	if _, err := db.Exec(ctx, `
-		INSERT INTO line_items (bill_id, reference, amount_minor, currency, fee_type)
-		VALUES ('bill-schema-guard-USD-2099-02', 'schema-guard-ref-dup', 100, 'USD', 'wire_transfer')`); err != nil {
+		INSERT INTO line_items (bill_id, reference, amount_minor, currency, fee_type, status)
+		VALUES ('bill-schema-guard-USD-2099-02', 'schema-guard-ref-dup', 100, 'USD', 'wire_transfer', 'FINALIZED')`); err != nil {
 		t.Fatalf("seed line item for uniqueness check: %v", err)
 	}
 
 	_, err = db.Exec(ctx, `
-		INSERT INTO line_items (bill_id, reference, amount_minor, currency, fee_type)
-		VALUES ('bill-schema-guard-USD-2099-02', 'schema-guard-ref-dup', 200, 'USD', 'wire_transfer')`)
+		INSERT INTO line_items (bill_id, reference, amount_minor, currency, fee_type, status)
+		VALUES ('bill-schema-guard-USD-2099-02', 'schema-guard-ref-dup', 200, 'USD', 'wire_transfer', 'FINALIZED')`)
 	assertPgErrorCode(t, err, "23505")
 }
 
@@ -274,6 +305,18 @@ func assertColumn(t *testing.T, columns map[string]columnInfo, name string, want
 	}
 	if got.identity != want.identity {
 		t.Fatalf("%s identity = %v, want %v", name, got.identity, want.identity)
+	}
+}
+
+func assertColumnHasNoDefault(t *testing.T, columns map[string]columnInfo, name string) {
+	t.Helper()
+
+	column, ok := columns[name]
+	if !ok {
+		t.Fatalf("missing column %s", name)
+	}
+	if column.def != "" {
+		t.Fatalf("%s default = %q, want no default", name, column.def)
 	}
 }
 

@@ -85,7 +85,9 @@ then checks `now < resolvePeriodEnd(period)`, then starts the workflow with ID
 
 `total` and `itemCount` are **computed on read** from `line_items`
 (`COALESCE(SUM(amount_minor),0)`, `COUNT(*)`), not stored columns — so they can't
-drift from the append-only rows.
+drift from the append-only rows. These aggregates currently include `PENDING`,
+`FINALIZED`, and `FAILED` line items; the normal add-line-item writer persists
+new rows as `FINALIZED`.
 
 ---
 
@@ -175,6 +177,7 @@ Returns total **and** items (FR3 requires both), read from the ledger:
       "currency": "USD",
       "feeType": "wire_transfer",
       "description": "Outbound USD wire",
+      "status": "FINALIZED",
       "appliedAt": "2026-07-03T14:22:03Z"
     }
   ]
@@ -205,7 +208,9 @@ GET /v1/bills/{billId}?includeLineItems=true
 
 Pure ledger read — works while OPEN and after the workflow ages out of retention.
 `total`/`itemCount` computed via `SUM`/`COUNT`. `includeLineItems=true` appends the
-itemized array (default omits it to keep the hot read cheap). `404` if absent.
+itemized array, including each row's `PENDING`, `FINALIZED`, or `FAILED` status
+(default omits it to keep the hot read cheap). Aggregates include all statuses.
+`404` if absent.
 
 **Transient status note.** There's a brief window at close where the workflow has
 stopped accepting items (in-memory status flipped) but the seal `UPDATE` hasn't

@@ -23,6 +23,9 @@ CREATE TABLE line_items (
     currency     CHAR(3)     NOT NULL,
     fee_type     TEXT        NOT NULL,
     description  TEXT        NOT NULL DEFAULT '',
+    status       TEXT        NOT NULL
+                 CONSTRAINT line_items_status_check
+                 CHECK (status IN ('PENDING', 'FINALIZED', 'FAILED')),
     applied_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
 
     CONSTRAINT line_items_bill_reference_unique UNIQUE (bill_id, reference)

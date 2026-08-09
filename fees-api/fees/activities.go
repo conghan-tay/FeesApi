@@ -46,8 +46,8 @@ func (a *Activities) ActivityPersistBill(ctx context.Context, input BillInput) e
 func (a *Activities) ActivityPersistLineItem(ctx context.Context, row LedgerRow) (bool, error) {
 	tag, err := a.db.Exec(ctx, `
 		INSERT INTO line_items
-			(bill_id, reference, amount_minor, currency, fee_type, description)
-		SELECT $1, $2, $3, $4, $5, $6
+			(bill_id, reference, amount_minor, currency, fee_type, description, status)
+		SELECT $1, $2, $3, $4, $5, $6, 'FINALIZED'
 		 WHERE EXISTS (
 			SELECT 1
 			  FROM bills

@@ -189,6 +189,7 @@ func readBillLineItemsFrom(ctx context.Context, q ledgerQuerier, id string) ([]L
 		       currency,
 		       fee_type,
 		       description,
+		       status,
 		       applied_at
 		  FROM line_items
 		 WHERE bill_id = $1
@@ -210,6 +211,7 @@ func readBillLineItemsFrom(ctx context.Context, q ledgerQuerier, id string) ([]L
 			&item.Currency,
 			&item.FeeType,
 			&item.Description,
+			&item.Status,
 			&item.AppliedAt,
 		); err != nil {
 			return nil, err

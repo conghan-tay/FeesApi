@@ -34,6 +34,7 @@ func TestActivityPersistLineItemFreshInsertAndDuplicate(t *testing.T) {
 		t.Fatal("ActivityPersistLineItem fresh insert applied=false, want true")
 	}
 	assertActivityLineItemCount(t, ctx, billID, row.Reference, 1)
+	assertActivityLineItemStatus(t, ctx, billID, row.Reference, "FINALIZED")
 
 	applied, err = activities.ActivityPersistLineItem(ctx, row)
 	if err != nil {
@@ -363,6 +364,25 @@ func assertActivityLineItemCount(t *testing.T, ctx context.Context, billID, refe
 	}
 	if got != want {
 		t.Fatalf("line item count for %s/%s = %d, want %d", billID, reference, got, want)
+	}
+}
+
+func assertActivityLineItemStatus(t *testing.T, ctx context.Context, billID, reference, want string) {
+	t.Helper()
+
+	var got string
+	if err := db.QueryRow(ctx, `
+		SELECT status
+		  FROM line_items
+		 WHERE bill_id = $1
+		   AND reference = $2`,
+		billID,
+		reference,
+	).Scan(&got); err != nil {
+		t.Fatalf("read line item status for %s/%s: %v", billID, reference, err)
+	}
+	if got != want {
+		t.Fatalf("line item status for %s/%s = %q, want %q", billID, reference, got, want)
 	}
 }
 
