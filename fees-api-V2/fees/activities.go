@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 
 	"encore.app/charge"
 	"encore.dev/storage/sqldb"
@@ -47,11 +48,10 @@ func (a *Activities) ActivityPublishPending(ctx context.Context, row LedgerRow) 
 		return errors.New("publish pending line item status: charge client is not configured")
 	}
 
-	amountMinor := row.AmountMinor
 	if err := a.lineItemStatusClient.PublishLineItemStatus(ctx, &charge.PublishLineItemStatusRequest{
 		BillID:      row.BillID,
 		Reference:   row.Reference,
-		MinorAmount: &amountMinor,
+		MinorAmount: strconv.FormatInt(row.AmountMinor, 10),
 		Currency:    row.Currency,
 		FeeType:     row.FeeType,
 		Description: row.Description,

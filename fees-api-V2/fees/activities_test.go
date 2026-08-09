@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strconv"
 	"testing"
 	"time"
 
@@ -18,17 +19,12 @@ type recordingLineItemStatusPublisher struct {
 
 func (p *recordingLineItemStatusPublisher) PublishLineItemStatus(_ context.Context, req *charge.PublishLineItemStatusRequest) error {
 	if req != nil {
-		copied := *req
-		if req.MinorAmount != nil {
-			amount := *req.MinorAmount
-			copied.MinorAmount = &amount
-		}
-		p.requests = append(p.requests, copied)
+		p.requests = append(p.requests, *req)
 	}
 	return p.err
 }
 
-func TestActivityPublishPendingPreservesInt64AndPayload(t *testing.T) {
+func TestActivityPublishPendingFormatsInt64AndPreservesPayload(t *testing.T) {
 	tests := []struct {
 		name   string
 		amount int64
@@ -61,7 +57,7 @@ func TestActivityPublishPendingPreservesInt64AndPayload(t *testing.T) {
 			if got.BillID != row.BillID || got.Reference != row.Reference || got.Currency != row.Currency || got.FeeType != row.FeeType || got.Description != row.Description {
 				t.Fatalf("published request = %#v, want row fields %#v", got, row)
 			}
-			if got.MinorAmount == nil || *got.MinorAmount != tt.amount {
+			if got.MinorAmount != strconv.FormatInt(tt.amount, 10) {
 				t.Fatalf("published minorAmount = %#v, want %d", got.MinorAmount, tt.amount)
 			}
 			if got.Status != charge.LineItemStatusPending {

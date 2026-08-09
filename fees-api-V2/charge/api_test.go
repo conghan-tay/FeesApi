@@ -161,15 +161,15 @@ func TestAddLineItemNilTemporalClientReturns503(t *testing.T) {
 	assertProblem(t, resp, "add-line-item-unavailable", http.StatusServiceUnavailable)
 }
 
-func TestPublishLineItemStatusAcceptsSupportedStatusesAndNumericAmounts(t *testing.T) {
+func TestPublishLineItemStatusAcceptsSupportedStatusesAndStringAmounts(t *testing.T) {
 	tests := []struct {
 		name   string
 		status string
-		amount int64
+		amount string
 	}{
-		{name: "pending positive", status: LineItemStatusPending, amount: 1500},
-		{name: "finalized zero", status: LineItemStatusFinalized, amount: 0},
-		{name: "failed negative", status: LineItemStatusFailed, amount: -500},
+		{name: "pending positive", status: LineItemStatusPending, amount: "1500"},
+		{name: "finalized zero", status: LineItemStatusFinalized, amount: "0"},
+		{name: "failed negative", status: LineItemStatusFailed, amount: "-500"},
 	}
 
 	for _, tt := range tests {
@@ -194,21 +194,22 @@ func TestPublishLineItemStatusAcceptsSupportedStatusesAndNumericAmounts(t *testi
 }
 
 func TestPublishLineItemStatusValidationFailuresReturn400(t *testing.T) {
-	validAmount := int64(1500)
 	tests := []struct {
 		name string
 		body *PublishLineItemStatusRequest
 	}{
 		{name: "missing body", body: nil},
-		{name: "missing bill ID", body: &PublishLineItemStatusRequest{Reference: "ref", MinorAmount: &validAmount, Currency: "USD", FeeType: "wire", Status: LineItemStatusPending}},
-		{name: "missing reference", body: &PublishLineItemStatusRequest{BillID: "bill-acme-USD-2099-01", MinorAmount: &validAmount, Currency: "USD", FeeType: "wire", Status: LineItemStatusPending}},
+		{name: "missing bill ID", body: &PublishLineItemStatusRequest{Reference: "ref", MinorAmount: "1500", Currency: "USD", FeeType: "wire", Status: LineItemStatusPending}},
+		{name: "missing reference", body: &PublishLineItemStatusRequest{BillID: "bill-acme-USD-2099-01", MinorAmount: "1500", Currency: "USD", FeeType: "wire", Status: LineItemStatusPending}},
 		{name: "missing minor amount", body: &PublishLineItemStatusRequest{BillID: "bill-acme-USD-2099-01", Reference: "ref", Currency: "USD", FeeType: "wire", Status: LineItemStatusPending}},
-		{name: "missing currency", body: &PublishLineItemStatusRequest{BillID: "bill-acme-USD-2099-01", Reference: "ref", MinorAmount: &validAmount, FeeType: "wire", Status: LineItemStatusPending}},
-		{name: "lowercase currency", body: &PublishLineItemStatusRequest{BillID: "bill-acme-USD-2099-01", Reference: "ref", MinorAmount: &validAmount, Currency: "usd", FeeType: "wire", Status: LineItemStatusPending}},
-		{name: "missing fee type", body: &PublishLineItemStatusRequest{BillID: "bill-acme-USD-2099-01", Reference: "ref", MinorAmount: &validAmount, Currency: "USD", Status: LineItemStatusPending}},
-		{name: "missing status", body: &PublishLineItemStatusRequest{BillID: "bill-acme-USD-2099-01", Reference: "ref", MinorAmount: &validAmount, Currency: "USD", FeeType: "wire"}},
-		{name: "lowercase status", body: &PublishLineItemStatusRequest{BillID: "bill-acme-USD-2099-01", Reference: "ref", MinorAmount: &validAmount, Currency: "USD", FeeType: "wire", Status: "pending"}},
-		{name: "unknown status", body: &PublishLineItemStatusRequest{BillID: "bill-acme-USD-2099-01", Reference: "ref", MinorAmount: &validAmount, Currency: "USD", FeeType: "wire", Status: "CANCELLED"}},
+		{name: "invalid minor amount", body: &PublishLineItemStatusRequest{BillID: "bill-acme-USD-2099-01", Reference: "ref", MinorAmount: "1.25", Currency: "USD", FeeType: "wire", Status: LineItemStatusPending}},
+		{name: "overflow minor amount", body: &PublishLineItemStatusRequest{BillID: "bill-acme-USD-2099-01", Reference: "ref", MinorAmount: "9223372036854775808", Currency: "USD", FeeType: "wire", Status: LineItemStatusPending}},
+		{name: "missing currency", body: &PublishLineItemStatusRequest{BillID: "bill-acme-USD-2099-01", Reference: "ref", MinorAmount: "1500", FeeType: "wire", Status: LineItemStatusPending}},
+		{name: "lowercase currency", body: &PublishLineItemStatusRequest{BillID: "bill-acme-USD-2099-01", Reference: "ref", MinorAmount: "1500", Currency: "usd", FeeType: "wire", Status: LineItemStatusPending}},
+		{name: "missing fee type", body: &PublishLineItemStatusRequest{BillID: "bill-acme-USD-2099-01", Reference: "ref", MinorAmount: "1500", Currency: "USD", Status: LineItemStatusPending}},
+		{name: "missing status", body: &PublishLineItemStatusRequest{BillID: "bill-acme-USD-2099-01", Reference: "ref", MinorAmount: "1500", Currency: "USD", FeeType: "wire"}},
+		{name: "lowercase status", body: &PublishLineItemStatusRequest{BillID: "bill-acme-USD-2099-01", Reference: "ref", MinorAmount: "1500", Currency: "USD", FeeType: "wire", Status: "pending"}},
+		{name: "unknown status", body: &PublishLineItemStatusRequest{BillID: "bill-acme-USD-2099-01", Reference: "ref", MinorAmount: "1500", Currency: "USD", FeeType: "wire", Status: "CANCELLED"}},
 	}
 
 	for _, tt := range tests {
@@ -225,29 +226,29 @@ func TestPublishLineItemStatusValidationFailuresReturn400(t *testing.T) {
 }
 
 func TestPublishLineItemStatusMinorAmountJSONContract(t *testing.T) {
-	valid := validPublishLineItemStatusRequest(1500, LineItemStatusPending)
+	valid := validPublishLineItemStatusRequest("1500", LineItemStatusPending)
 	encoded, err := json.Marshal(valid)
 	if err != nil {
 		t.Fatalf("marshal request: %v", err)
 	}
-	if !strings.Contains(string(encoded), `"minorAmount":1500`) {
-		t.Fatalf("encoded request = %s, want numeric minorAmount", encoded)
+	if !strings.Contains(string(encoded), `"minorAmount":"1500"`) {
+		t.Fatalf("encoded request = %s, want string minorAmount", encoded)
 	}
-	if strings.Contains(string(encoded), `"minorAmount":"1500"`) {
-		t.Fatalf("encoded request = %s, minorAmount must not be a string", encoded)
+	if strings.Contains(string(encoded), `"minorAmount":1500`) {
+		t.Fatalf("encoded request = %s, minorAmount must not be numeric", encoded)
 	}
 
-	validJSON := `{"billId":"bill-acme-USD-2099-01","reference":"ref","minorAmount":-500,"currency":"USD","feeType":"wire","description":"test","status":"PENDING"}`
+	validJSON := `{"billId":"bill-acme-USD-2099-01","reference":"ref","minorAmount":"-500","currency":"USD","feeType":"wire","description":"test","status":"PENDING"}`
 	var decoded PublishLineItemStatusRequest
 	if err := json.Unmarshal([]byte(validJSON), &decoded); err != nil {
-		t.Fatalf("decode numeric minorAmount: %v", err)
+		t.Fatalf("decode string minorAmount: %v", err)
 	}
-	if decoded.MinorAmount == nil || *decoded.MinorAmount != -500 {
+	if decoded.MinorAmount != "-500" {
 		t.Fatalf("decoded minorAmount = %#v, want -500", decoded.MinorAmount)
 	}
 
 	for _, invalidJSON := range []string{
-		`{"minorAmount":"1500"}`,
+		`{"minorAmount":1500}`,
 		`{"minorAmount":1.5}`,
 		`{"minorAmount":9223372036854775808}`,
 	} {
@@ -267,11 +268,11 @@ func validAddLineItemRequest() AddLineItemRequest {
 	}
 }
 
-func validPublishLineItemStatusRequest(amount int64, status string) PublishLineItemStatusRequest {
+func validPublishLineItemStatusRequest(amount string, status string) PublishLineItemStatusRequest {
 	return PublishLineItemStatusRequest{
 		BillID:      "bill-acme-USD-2099-01",
 		Reference:   "ref-status",
-		MinorAmount: &amount,
+		MinorAmount: amount,
 		Currency:    "USD",
 		FeeType:     "wire_transfer",
 		Description: "Outbound USD wire",

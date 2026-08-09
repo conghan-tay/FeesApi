@@ -36,7 +36,7 @@ type AddLineItemResponse struct {
 type PublishLineItemStatusRequest struct {
 	BillID      string `json:"billId"`
 	Reference   string `json:"reference"`
-	MinorAmount *int64 `json:"minorAmount"`
+	MinorAmount string `json:"minorAmount"`
 	Currency    string `json:"currency"`
 	FeeType     string `json:"feeType"`
 	Description string `json:"description"`
@@ -98,6 +98,7 @@ func (s *Service) PublishLineItemStatus(_ context.Context, req *PublishLineItemS
 	if validationErr := validatePublishLineItemStatusRequest(*req); validationErr != "" {
 		return apiError(errs.InvalidArgument, "invalid-request", validationErr)
 	}
+	rlog.Info("PublishLineItemStatus Success BillId", req.BillID, " reference", req.Reference)
 	return nil
 }
 
@@ -134,8 +135,11 @@ func validatePublishLineItemStatusRequest(input PublishLineItemStatusRequest) st
 	if input.Reference == "" {
 		return "reference is required"
 	}
-	if input.MinorAmount == nil {
+	if input.MinorAmount == "" {
 		return "minorAmount is required"
+	}
+	if _, err := strconv.ParseInt(input.MinorAmount, 10, 64); err != nil {
+		return "minorAmount must be an integer minor-unit amount encoded as a string"
 	}
 	if !currencyPattern.MatchString(input.Currency) {
 		return "currency must be a three-letter uppercase ISO-4217 code"
