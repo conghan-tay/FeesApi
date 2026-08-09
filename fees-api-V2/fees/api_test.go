@@ -19,7 +19,6 @@ import (
 	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/api/serviceerror"
 	"go.temporal.io/sdk/client"
-	"go.temporal.io/sdk/temporal"
 )
 
 func TestBillResourceEncodesClosedAtNull(t *testing.T) {
@@ -750,293 +749,6 @@ func TestOpenBillNilTemporalClientDoesNotPersistBill(t *testing.T) {
 	}
 }
 
-func TestAddLineItemFreshReturns201AndCallsWorkflowUpdate(t *testing.T) {
-	reqBody := AddLineItemRequest{
-		Reference:   "pay-svc-evt-98213",
-		MinorAmount: "1500",
-		Currency:    "USD",
-		FeeType:     "wire_transfer",
-		Description: "Outbound USD wire",
-	}
-	temporalClient := &openTemporalClient{
-		workflowHandle: &openUpdateHandle{
-			lineItemResult: LineItemResult{Reference: reqBody.Reference, Applied: true},
-		},
-	}
-	svc := &Service{temporalClient: temporalClient}
-	billID := "bill-acme-USD-2099-01"
-
-	resp := performAddLineItem(t, svc, billID, reqBody)
-
-	if resp.Code != http.StatusCreated {
-		t.Fatalf("status = %d, want 201. Body: %s", resp.Code, resp.Body.String())
-	}
-	var body AddLineItemResponse
-	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
-		t.Fatalf("decode response body: %v", err)
-	}
-	if body != (AddLineItemResponse{Reference: reqBody.Reference, Applied: true}) {
-		t.Fatalf("response = %#v, want fresh result", body)
-	}
-	var raw map[string]any
-	if err := json.Unmarshal(resp.Body.Bytes(), &raw); err != nil {
-		t.Fatalf("decode raw response body: %v", err)
-	}
-	if _, ok := raw["reference"]; !ok {
-		t.Fatal("expected lowercase JSON key reference")
-	}
-	if _, ok := raw["applied"]; !ok {
-		t.Fatal("expected lowercase JSON key applied")
-	}
-	if _, ok := raw["Reference"]; ok {
-		t.Fatal("did not expect exported Go field name Reference in JSON")
-	}
-	assertAddLineItemUpdateOptions(t, temporalClient, billID, LineItem{
-		Reference:   reqBody.Reference,
-		AmountMinor: 1500,
-		Currency:    reqBody.Currency,
-		FeeType:     reqBody.FeeType,
-		Description: reqBody.Description,
-	})
-}
-
-func TestAddLineItemDuplicateReturns200(t *testing.T) {
-	reqBody := AddLineItemRequest{
-		Reference:   "pay-svc-evt-duplicate",
-		MinorAmount: "1500",
-		Currency:    "USD",
-		FeeType:     "wire_transfer",
-		Description: "Outbound USD wire",
-	}
-	temporalClient := &openTemporalClient{
-		workflowHandle: &openUpdateHandle{
-			lineItemResult: LineItemResult{Reference: reqBody.Reference, Applied: false},
-		},
-	}
-	svc := &Service{temporalClient: temporalClient}
-
-	resp := performAddLineItem(t, svc, "bill-acme-USD-2099-01", reqBody)
-
-	if resp.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200. Body: %s", resp.Code, resp.Body.String())
-	}
-	var body AddLineItemResponse
-	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
-		t.Fatalf("decode response body: %v", err)
-	}
-	if body != (AddLineItemResponse{Reference: reqBody.Reference, Applied: false}) {
-		t.Fatalf("response = %#v, want duplicate result", body)
-	}
-}
-
-func TestAddLineItemValidationFailuresDoNotCallTemporal(t *testing.T) {
-	tests := []struct {
-		name   string
-		billID string
-		body   AddLineItemRequest
-	}{
-		{name: "missing bill ID", billID: "", body: AddLineItemRequest{Reference: "ref", MinorAmount: "1", Currency: "USD", FeeType: "wire"}},
-		{name: "missing reference", billID: "bill-acme-USD-2099-01", body: AddLineItemRequest{MinorAmount: "1", Currency: "USD", FeeType: "wire"}},
-		{name: "missing minor amount", billID: "bill-acme-USD-2099-01", body: AddLineItemRequest{Reference: "ref", Currency: "USD", FeeType: "wire"}},
-		{name: "invalid minor amount", billID: "bill-acme-USD-2099-01", body: AddLineItemRequest{Reference: "ref", MinorAmount: "1.25", Currency: "USD", FeeType: "wire"}},
-		{name: "overflow minor amount", billID: "bill-acme-USD-2099-01", body: AddLineItemRequest{Reference: "ref", MinorAmount: "9223372036854775808", Currency: "USD", FeeType: "wire"}},
-		{name: "lowercase currency", billID: "bill-acme-USD-2099-01", body: AddLineItemRequest{Reference: "ref", MinorAmount: "1", Currency: "usd", FeeType: "wire"}},
-		{name: "missing fee type", billID: "bill-acme-USD-2099-01", body: AddLineItemRequest{Reference: "ref", MinorAmount: "1", Currency: "USD"}},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			temporalClient := &openTemporalClient{}
-			svc := &Service{temporalClient: temporalClient}
-
-			resp := performAddLineItem(t, svc, tt.billID, tt.body)
-
-			if resp.Code != http.StatusBadRequest {
-				t.Fatalf("status = %d, want 400. Body: %s", resp.Code, resp.Body.String())
-			}
-			assertProblem(t, resp, "invalid-request", http.StatusBadRequest)
-			if temporalClient.updateWorkflowCount != 0 {
-				t.Fatalf("Temporal UpdateWorkflow calls = %d, want 0", temporalClient.updateWorkflowCount)
-			}
-		})
-	}
-}
-
-func TestAddLineItemTemporalErrorMapping(t *testing.T) {
-	tests := []struct {
-		name       string
-		directErr  error
-		handleErr  error
-		wantStatus int
-		wantType   string
-	}{
-		{
-			name:       "direct not found",
-			directErr:  serviceerror.NewNotFound("workflow not found"),
-			wantStatus: http.StatusNotFound,
-			wantType:   "no-bill",
-		},
-		{
-			name:       "handle not found",
-			handleErr:  serviceerror.NewNotFound("workflow not found"),
-			wantStatus: http.StatusNotFound,
-			wantType:   "no-bill",
-		},
-		{
-			name:       "currency mismatch",
-			handleErr:  temporal.NewApplicationError("currency mismatch", "CurrencyMismatch"),
-			wantStatus: http.StatusBadRequest,
-			wantType:   "currency-mismatch",
-		},
-		{
-			name:       "bill not open",
-			handleErr:  temporal.NewApplicationError("bill not open", "BillNotOpen"),
-			wantStatus: http.StatusConflict,
-			wantType:   "bill-not-open",
-		},
-		{
-			name:       "direct generic error",
-			directErr:  errors.New("dial tcp 10.0.4.23:7233: connect: connection refused"),
-			wantStatus: http.StatusServiceUnavailable,
-			wantType:   "add-line-item-unavailable",
-		},
-		{
-			name:       "handle generic error",
-			handleErr:  errors.New("persist failed: host=10.0.4.23"),
-			wantStatus: http.StatusServiceUnavailable,
-			wantType:   "add-line-item-unavailable",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			temporalClient := &openTemporalClient{
-				workflowErr: tt.directErr,
-				workflowHandle: &openUpdateHandle{
-					err: tt.handleErr,
-				},
-			}
-			svc := &Service{temporalClient: temporalClient}
-
-			resp := performAddLineItem(t, svc, "bill-acme-USD-2099-01", AddLineItemRequest{
-				Reference:   "ref-error",
-				MinorAmount: "1500",
-				Currency:    "USD",
-				FeeType:     "wire_transfer",
-				Description: "Outbound USD wire",
-			})
-
-			if resp.Code != tt.wantStatus {
-				t.Fatalf("status = %d, want %d. Body: %s", resp.Code, tt.wantStatus, resp.Body.String())
-			}
-			assertProblem(t, resp, tt.wantType, tt.wantStatus)
-			assertProblemDoesNotContain(t, resp, "10.0.4.23")
-		})
-	}
-}
-
-func TestAddLineItemWorkflowNotFoundLedgerFallback(t *testing.T) {
-	ctx := context.Background()
-	closedAt := time.Date(2099, 2, 1, 0, 0, 0, 0, time.UTC)
-	tests := []struct {
-		name       string
-		directErr  error
-		handleErr  error
-		status     string
-		closedAt   *time.Time
-		wantStatus int
-		wantType   string
-	}{
-		{
-			name:       "direct missing ledger bill",
-			directErr:  serviceerror.NewNotFound("workflow not found"),
-			wantStatus: http.StatusNotFound,
-			wantType:   "no-bill",
-		},
-		{
-			name:       "handle missing ledger bill",
-			handleErr:  serviceerror.NewNotFound("workflow not found"),
-			wantStatus: http.StatusNotFound,
-			wantType:   "no-bill",
-		},
-		{
-			name:       "direct closed ledger bill",
-			directErr:  serviceerror.NewNotFound("workflow not found"),
-			status:     "CLOSED",
-			closedAt:   &closedAt,
-			wantStatus: http.StatusConflict,
-			wantType:   "bill-closed",
-		},
-		{
-			name:       "handle closed ledger bill",
-			handleErr:  serviceerror.NewNotFound("workflow not found"),
-			status:     "CLOSED",
-			closedAt:   &closedAt,
-			wantStatus: http.StatusConflict,
-			wantType:   "bill-closed",
-		},
-		{
-			name:       "direct open ledger bill",
-			directErr:  serviceerror.NewNotFound("workflow not found"),
-			status:     "OPEN",
-			wantStatus: http.StatusServiceUnavailable,
-			wantType:   "add-line-item-unavailable",
-		},
-		{
-			name:       "handle open ledger bill",
-			handleErr:  serviceerror.NewNotFound("workflow not found"),
-			status:     "OPEN",
-			wantStatus: http.StatusServiceUnavailable,
-			wantType:   "add-line-item-unavailable",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			billID := "bill-api-add-fallback-" + strings.ReplaceAll(tt.name, " ", "-") + "-USD-2099-01"
-			cleanupActivityBill(t, ctx, billID)
-			if tt.status != "" {
-				clientID := strings.TrimSuffix(strings.TrimPrefix(billID, "bill-"), "-USD-2099-01")
-				seedActivityBill(t, ctx, billID, clientID, "USD", "2099-01", tt.status, tt.closedAt)
-			}
-
-			temporalClient := &openTemporalClient{
-				workflowErr: tt.directErr,
-				workflowHandle: &openUpdateHandle{
-					err: tt.handleErr,
-				},
-			}
-			resp := performAddLineItem(t, &Service{temporalClient: temporalClient}, billID, AddLineItemRequest{
-				Reference:   "ref-fallback",
-				MinorAmount: "1500",
-				Currency:    "USD",
-				FeeType:     "wire_transfer",
-				Description: "Outbound USD wire",
-			})
-
-			if resp.Code != tt.wantStatus {
-				t.Fatalf("status = %d, want %d. Body: %s", resp.Code, tt.wantStatus, resp.Body.String())
-			}
-			assertProblem(t, resp, tt.wantType, tt.wantStatus)
-			assertProblemDoesNotContain(t, resp, "workflow not found")
-		})
-	}
-}
-
-func TestAddLineItemNilTemporalClientReturns503(t *testing.T) {
-	resp := performAddLineItem(t, &Service{}, "bill-acme-USD-2099-01", AddLineItemRequest{
-		Reference:   "ref-unavailable",
-		MinorAmount: "1500",
-		Currency:    "USD",
-		FeeType:     "wire_transfer",
-	})
-
-	if resp.Code != http.StatusServiceUnavailable {
-		t.Fatalf("status = %d, want 503. Body: %s", resp.Code, resp.Body.String())
-	}
-	assertProblem(t, resp, "add-line-item-unavailable", http.StatusServiceUnavailable)
-}
-
 func TestCloseBillOpenBillSignalsWorkflowAndReturnsInvoice(t *testing.T) {
 	ctx := context.Background()
 	billID := "bill-api-close-open-USD-2099-01"
@@ -1302,25 +1014,21 @@ type openTemporalClient struct {
 	executeMu  sync.Mutex
 
 	executeWorkflowCount int
-	updateWorkflowCount  int
 	signalWorkflowCount  int
 	getWorkflowCount     int
 
-	startOptions          client.StartWorkflowOptions
-	startWorkflow         interface{}
-	startArgs             []interface{}
-	workflowUpdateOptions client.UpdateWorkflowOptions
-	signalWorkflowID      string
-	signalRunID           string
-	signalName            string
-	signalArg             interface{}
-	getWorkflowID         string
-	getRunID              string
+	startOptions     client.StartWorkflowOptions
+	startWorkflow    interface{}
+	startArgs        []interface{}
+	signalWorkflowID string
+	signalRunID      string
+	signalName       string
+	signalArg        interface{}
+	getWorkflowID    string
+	getRunID         string
 
 	executeErr      error
 	beforeExecute   func(context.Context, client.StartWorkflowOptions, interface{}, []interface{}) error
-	workflowHandle  client.WorkflowUpdateHandle
-	workflowErr     error
 	run             client.WorkflowRun
 	signalErr       error
 	beforeSignalErr func(context.Context) error
@@ -1347,18 +1055,6 @@ func (c *openTemporalClient) ExecuteWorkflow(ctx context.Context, options client
 		return nil, c.executeErr
 	}
 	return &openWorkflowRun{}, nil
-}
-
-func (c *openTemporalClient) UpdateWorkflow(_ context.Context, options client.UpdateWorkflowOptions) (client.WorkflowUpdateHandle, error) {
-	c.updateWorkflowCount++
-	c.workflowUpdateOptions = options
-	if c.workflowErr != nil {
-		return nil, c.workflowErr
-	}
-	if c.workflowHandle != nil {
-		return c.workflowHandle, nil
-	}
-	return &openUpdateHandle{}, nil
 }
 
 func (c *openTemporalClient) SignalWorkflow(ctx context.Context, workflowID string, runID string, signalName string, arg interface{}) error {
@@ -1411,25 +1107,6 @@ func (r *openWorkflowRun) GetWithOptions(ctx context.Context, valuePtr interface
 	return r.Get(ctx, valuePtr)
 }
 
-type openUpdateHandle struct {
-	lineItemResult LineItemResult
-	err            error
-}
-
-func (h *openUpdateHandle) WorkflowID() string { return "" }
-func (h *openUpdateHandle) RunID() string      { return "" }
-func (h *openUpdateHandle) UpdateID() string   { return "" }
-
-func (h *openUpdateHandle) Get(_ context.Context, valuePtr interface{}) error {
-	if h.err != nil {
-		return h.err
-	}
-	if out, ok := valuePtr.(*LineItemResult); ok {
-		*out = h.lineItemResult
-	}
-	return nil
-}
-
 func performOpenBill(t *testing.T, svc *Service, body OpenBillRequest) *httptest.ResponseRecorder {
 	t.Helper()
 
@@ -1460,25 +1137,6 @@ func performOpenBill(t *testing.T, svc *Service, body OpenBillRequest) *httptest
 		ItemCount:        out.ItemCount,
 		OpenedAt:         out.OpenedAt,
 		ClosedAt:         out.ClosedAt,
-	})
-	return resp
-}
-
-func performAddLineItem(t *testing.T, svc *Service, billID string, body AddLineItemRequest) *httptest.ResponseRecorder {
-	t.Helper()
-
-	resp := httptest.NewRecorder()
-	out, err := svc.AddLineItem(context.Background(), billID, &body)
-	if err != nil {
-		errs.HTTPError(resp, err)
-		return resp
-	}
-	writeTestJSON(t, resp, out.HTTPStatus, struct {
-		Reference string `json:"reference"`
-		Applied   bool   `json:"applied"`
-	}{
-		Reference: out.Reference,
-		Applied:   out.Applied,
 	})
 	return resp
 }
@@ -1563,37 +1221,6 @@ func writeTestJSON(t *testing.T, resp *httptest.ResponseRecorder, status int, bo
 	resp.WriteHeader(status)
 	if err := json.NewEncoder(resp).Encode(body); err != nil {
 		t.Fatalf("encode response: %v", err)
-	}
-}
-
-func assertAddLineItemUpdateOptions(t *testing.T, temporalClient *openTemporalClient, billID string, want LineItem) {
-	t.Helper()
-
-	if temporalClient.updateWorkflowCount != 1 {
-		t.Fatalf("UpdateWorkflow calls = %d, want 1", temporalClient.updateWorkflowCount)
-	}
-	options := temporalClient.workflowUpdateOptions
-	if options.WorkflowID != billID {
-		t.Fatalf("workflow ID = %q, want %q", options.WorkflowID, billID)
-	}
-	if options.UpdateName != UpdateAddLineItem {
-		t.Fatalf("update name = %q, want %q", options.UpdateName, UpdateAddLineItem)
-	}
-	if options.WaitForStage != client.WorkflowUpdateStageCompleted {
-		t.Fatalf("wait stage = %v, want completed", options.WaitForStage)
-	}
-	if options.UpdateID != "" {
-		t.Fatalf("UpdateID = %q, want empty", options.UpdateID)
-	}
-	if len(options.Args) != 1 {
-		t.Fatalf("args length = %d, want 1", len(options.Args))
-	}
-	got, ok := options.Args[0].(LineItem)
-	if !ok {
-		t.Fatalf("arg[0] = %T, want LineItem", options.Args[0])
-	}
-	if got != want {
-		t.Fatalf("LineItem arg = %#v, want %#v", got, want)
 	}
 }
 

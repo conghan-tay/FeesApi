@@ -91,7 +91,7 @@ func TestFeesLifecycleE2E(t *testing.T) {
 		for _, item := range items {
 			resp, err := client.AddLineItem(ctx, billID, item)
 			requireNoClientError(t, err)
-			requireStatus(t, resp, http.StatusCreated)
+			requireStatus(t, resp, http.StatusAccepted)
 			if resp.Body == nil {
 				t.Fatal("expected line item result body")
 			}
@@ -105,9 +105,7 @@ func TestFeesLifecycleE2E(t *testing.T) {
 	})
 
 	t.Run("get running total", func(t *testing.T) {
-		resp, err := client.GetBill(ctx, billID, false)
-		requireNoClientError(t, err)
-		requireStatus(t, resp, http.StatusOK)
+		resp := waitForBillFacts(t, ctx, client, billID, expectedTotal, len(items))
 		if resp.Body == nil {
 			t.Fatal("expected bill body")
 		}
@@ -122,12 +120,12 @@ func TestFeesLifecycleE2E(t *testing.T) {
 	t.Run("duplicate item is idempotent", func(t *testing.T) {
 		resp, err := client.AddLineItem(ctx, billID, items[1])
 		requireNoClientError(t, err)
-		requireStatus(t, resp, http.StatusOK)
+		requireStatus(t, resp, http.StatusAccepted)
 		if resp.Body == nil {
 			t.Fatal("expected line item result body")
 		}
-		if resp.Body.Applied {
-			t.Fatal("applied = true for duplicate reference, want false")
+		if !resp.Body.Applied {
+			t.Fatal("applied = false for accepted duplicate signal, want true")
 		}
 
 		getResp, err := client.GetBill(ctx, billID, false)
@@ -138,13 +136,16 @@ func TestFeesLifecycleE2E(t *testing.T) {
 		}
 	})
 
-	t.Run("mismatched currency is rejected", func(t *testing.T) {
+	t.Run("mismatched currency signal is accepted asynchronously", func(t *testing.T) {
 		item := items[0]
 		item.Reference = "pay-svc-" + runID + "-mismatch"
 		item.Currency = "GEL"
 		resp, err := client.AddLineItem(ctx, billID, item)
 		requireNoClientError(t, err)
-		requireStatus(t, resp, http.StatusBadRequest)
+		requireStatus(t, resp, http.StatusAccepted)
+		if resp.Body == nil || !resp.Body.Applied {
+			t.Fatalf("mismatched currency response = %#v, want accepted=true", resp.Body)
+		}
 	})
 
 	var closedBody BillResource
@@ -172,12 +173,12 @@ func TestFeesLifecycleE2E(t *testing.T) {
 		}
 	})
 
-	t.Run("add after close is rejected", func(t *testing.T) {
+	t.Run("add after close is unavailable", func(t *testing.T) {
 		item := items[0]
 		item.Reference = "pay-svc-" + runID + "-after-close"
 		resp, err := client.AddLineItem(ctx, billID, item)
 		requireNoClientError(t, err)
-		requireStatus(t, resp, http.StatusConflict)
+		requireStatus(t, resp, http.StatusServiceUnavailable)
 	})
 
 	t.Run("re-close is idempotent", func(t *testing.T) {
@@ -244,6 +245,50 @@ func TestFeesLifecycleE2E(t *testing.T) {
 			}
 		}
 	})
+}
+
+func waitForBillFacts(
+	t *testing.T,
+	ctx context.Context,
+	client *Client,
+	billID string,
+	wantTotal string,
+	wantCount int,
+) *Response[BillResource] {
+	t.Helper()
+
+	deadline := time.NewTimer(10 * time.Second)
+	defer deadline.Stop()
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+
+	var last *Response[BillResource]
+	for {
+		resp, err := client.GetBill(ctx, billID, false)
+		requireNoClientError(t, err)
+		requireStatus(t, resp, http.StatusOK)
+		last = resp
+		if resp.Body != nil && resp.Body.TotalMinorAmount == wantTotal && resp.Body.ItemCount == wantCount {
+			return resp
+		}
+
+		select {
+		case <-ctx.Done():
+			t.Fatalf("context ended waiting for bill facts: %v", ctx.Err())
+		case <-deadline.C:
+			if last == nil || last.Body == nil {
+				t.Fatal("timed out waiting for accepted line-item signals to become visible; no bill body received")
+			}
+			t.Fatalf(
+				"timed out waiting for bill facts: total=%q count=%d, want total=%q count=%d",
+				last.Body.TotalMinorAmount,
+				last.Body.ItemCount,
+				wantTotal,
+				wantCount,
+			)
+		case <-ticker.C:
+		}
+	}
 }
 
 func preflight(t *testing.T, ctx context.Context, client *Client) {

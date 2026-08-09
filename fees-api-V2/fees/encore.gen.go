@@ -13,11 +13,6 @@ func OpenBill(ctx context.Context, p *OpenBillRequest) (*OpenBillResponse, error
 	return (*OpenBillResponse)(nil), nil
 }
 
-func AddLineItem(ctx context.Context, billId string, p *AddLineItemRequest) (*AddLineItemResponse, error) {
-	// The implementation is elided here, and generated at compile-time by Encore.
-	return (*AddLineItemResponse)(nil), nil
-}
-
 func CloseBill(ctx context.Context, billId string, p *CloseBillRequest) (*InvoiceResource, error) {
 	// The implementation is elided here, and generated at compile-time by Encore.
 	return (*InvoiceResource)(nil), nil
@@ -39,8 +34,6 @@ func ListBills(ctx context.Context, p *ListBillsRequest) (*ListBillsResponse, er
 // support service-to-service API calls to raw endpoints.
 type Interface interface {
 	OpenBill(ctx context.Context, p *OpenBillRequest) (*OpenBillResponse, error)
-
-	AddLineItem(ctx context.Context, billId string, p *AddLineItemRequest) (*AddLineItemResponse, error)
 
 	CloseBill(ctx context.Context, billId string, p *CloseBillRequest) (*InvoiceResource, error)
 

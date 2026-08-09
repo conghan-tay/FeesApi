@@ -25,7 +25,6 @@ type temporalClient interface {
 	ExecuteWorkflow(ctx context.Context, options client.StartWorkflowOptions, workflow interface{}, args ...interface{}) (client.WorkflowRun, error)
 	GetWorkflow(ctx context.Context, workflowID string, runID string) client.WorkflowRun
 	SignalWorkflow(ctx context.Context, workflowID string, runID string, signalName string, arg interface{}) error
-	UpdateWorkflow(ctx context.Context, options client.UpdateWorkflowOptions) (client.WorkflowUpdateHandle, error)
 }
 
 type temporalWorker interface {

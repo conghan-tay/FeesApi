@@ -28,19 +28,6 @@ func (s BillStatus) acceptsAccruals() bool {
 	return s == OPEN
 }
 
-type LineItem struct {
-	Reference   string
-	AmountMinor int64
-	Currency    string
-	FeeType     string
-	Description string
-}
-
-type LineItemResult struct {
-	Reference string
-	Applied   bool
-}
-
 type CloseSignal struct {
 	Reason string
 }

@@ -46,10 +46,6 @@ func (c *fakeTemporalClient) SignalWorkflow(context.Context, string, string, str
 	return nil
 }
 
-func (c *fakeTemporalClient) UpdateWorkflow(context.Context, client.UpdateWorkflowOptions) (client.WorkflowUpdateHandle, error) {
-	return nil, nil
-}
-
 type fakeWorkflowRun struct{}
 
 func (fakeWorkflowRun) Get(context.Context, interface{}) error {
