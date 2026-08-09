@@ -106,6 +106,27 @@ func (h *lineItemSignalHandler) start(ctx workflow.Context, state *BillState, li
 			h.done.SendAsync(struct{}{})
 		}()
 
+		row := ledgerRow(state, li)
+		publishCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
+			StartToCloseTimeout: 30 * time.Second,
+			RetryPolicy: &temporal.RetryPolicy{
+				InitialInterval:    time.Second,
+				BackoffCoefficient: 2.0,
+				MaximumInterval:    time.Minute,
+				MaximumAttempts:    5,
+			},
+		})
+		if err := workflow.ExecuteActivity(publishCtx, ActivityPublishPending, row).
+			Get(publishCtx, nil); err != nil {
+			workflow.GetLogger(ctx).Error(
+				"publish pending line item status failed",
+				"billID", id,
+				"reference", li.Reference,
+				"err", err,
+			)
+			return
+		}
+
 		activityCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
 			StartToCloseTimeout: 30 * time.Second,
 			RetryPolicy: &temporal.RetryPolicy{
@@ -114,9 +135,8 @@ func (h *lineItemSignalHandler) start(ctx workflow.Context, state *BillState, li
 				MaximumInterval:    time.Minute,
 			},
 		})
-
 		var applied bool
-		if err := workflow.ExecuteActivity(activityCtx, ActivityPersistLineItem, ledgerRow(state, li)).
+		if err := workflow.ExecuteActivity(activityCtx, ActivityPersistLineItem, row).
 			Get(activityCtx, &applied); err != nil {
 			workflow.GetLogger(ctx).Error(
 				"add line item signal failed",

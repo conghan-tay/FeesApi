@@ -13,6 +13,12 @@ import (
 
 var currencyPattern = regexp.MustCompile(`^[A-Z]{3}$`)
 
+const (
+	LineItemStatusPending   = "PENDING"
+	LineItemStatusFinalized = "FINALIZED"
+	LineItemStatusFailed    = "FAILED"
+)
+
 type AddLineItemRequest struct {
 	Reference   string `json:"reference"`
 	MinorAmount string `json:"minorAmount"`
@@ -25,6 +31,16 @@ type AddLineItemResponse struct {
 	Reference  string `json:"reference"`
 	Applied    bool   `json:"applied"`
 	HTTPStatus int    `encore:"httpstatus"`
+}
+
+type PublishLineItemStatusRequest struct {
+	BillID      string `json:"billId"`
+	Reference   string `json:"reference"`
+	MinorAmount string `json:"minorAmount"`
+	Currency    string `json:"currency"`
+	FeeType     string `json:"feeType"`
+	Description string `json:"description"`
+	Status      string `json:"status"`
 }
 
 type APIErrorDetails struct {
@@ -74,6 +90,18 @@ func (s *Service) AddLineItem(ctx context.Context, billId string, req *AddLineIt
 	}, nil
 }
 
+//encore:api public method=POST path=/v1/line-item-status
+func (s *Service) PublishLineItemStatus(_ context.Context, req *PublishLineItemStatusRequest) error {
+	if req == nil {
+		return apiError(errs.InvalidArgument, "invalid-request", "request body is required")
+	}
+	if validationErr := validatePublishLineItemStatusRequest(*req); validationErr != "" {
+		return apiError(errs.InvalidArgument, "invalid-request", validationErr)
+	}
+	rlog.Info("PublishLineItemStatus Success BillId", req.BillID, " reference", req.Reference)
+	return nil
+}
+
 func validateAddLineItemRequest(input AddLineItemRequest) (chargecontract.LineItem, string) {
 	if input.Reference == "" {
 		return chargecontract.LineItem{}, "reference is required"
@@ -98,6 +126,35 @@ func validateAddLineItemRequest(input AddLineItemRequest) (chargecontract.LineIt
 		FeeType:     input.FeeType,
 		Description: input.Description,
 	}, ""
+}
+
+func validatePublishLineItemStatusRequest(input PublishLineItemStatusRequest) string {
+	if input.BillID == "" {
+		return "billId is required"
+	}
+	if input.Reference == "" {
+		return "reference is required"
+	}
+	if input.MinorAmount == "" {
+		return "minorAmount is required"
+	}
+	if _, err := strconv.ParseInt(input.MinorAmount, 10, 64); err != nil {
+		return "minorAmount must be an integer minor-unit amount encoded as a string"
+	}
+	if !currencyPattern.MatchString(input.Currency) {
+		return "currency must be a three-letter uppercase ISO-4217 code"
+	}
+	if input.FeeType == "" {
+		return "feeType is required"
+	}
+	switch input.Status {
+	case LineItemStatusPending, LineItemStatusFinalized, LineItemStatusFailed:
+		return ""
+	case "":
+		return "status is required"
+	default:
+		return "status must be one of PENDING, FINALIZED, or FAILED"
+	}
 }
 
 func addLineItemUnavailable() error {

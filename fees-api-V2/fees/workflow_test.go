@@ -88,13 +88,17 @@ func TestBillWorkflowHandlesAddLineItemWithoutStartupActivity(t *testing.T) {
 }
 
 func TestBillWorkflowAddLineItemSignalPersistsFreshItem(t *testing.T) {
-	env := newBillWorkflowTestEnv()
+	env := newBillWorkflowTestEnvWithoutDefaultPublisher()
 	in := testBillInput()
 	item := testLineItem("ref-fresh", "USD")
 	row := testLedgerRow(in, item)
 
+	publishCall := env.OnActivity(ActivityPublishPending, mock.Anything, row).
+		Return(nil).
+		Once()
 	env.OnActivity(ActivityPersistLineItem, mock.Anything, row).
 		Return(true, nil).
+		NotBefore(publishCall).
 		Once()
 	env.OnActivity(ActivityPersistInvoice, mock.Anything, row.BillID).
 		Return(testClosedBillView(in), nil).
@@ -110,6 +114,62 @@ func TestBillWorkflowAddLineItemSignalPersistsFreshItem(t *testing.T) {
 	env.ExecuteWorkflow(BillWorkflow, in)
 	assertBillWorkflowCompleted(t, env)
 	env.AssertExpectations(t)
+}
+
+func TestBillWorkflowPublishesPendingForEveryDuplicateSignal(t *testing.T) {
+	env := newBillWorkflowTestEnvWithoutDefaultPublisher()
+	in := testBillInput()
+	item := testLineItem("ref-duplicate-signal", "USD")
+	row := testLedgerRow(in, item)
+
+	env.OnActivity(ActivityPublishPending, mock.Anything, row).
+		Return(nil).
+		Twice()
+	env.OnActivity(ActivityPersistLineItem, mock.Anything, row).
+		Return(false, nil).
+		Twice()
+	env.OnActivity(ActivityPersistInvoice, mock.Anything, row.BillID).
+		Return(testClosedBillView(in), nil).
+		Once()
+
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow(chargecontract.SignalAddLineItem, item)
+		env.SignalWorkflow(chargecontract.SignalAddLineItem, item)
+	}, time.Millisecond)
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow(SignalCloseBill, CloseSignal{Reason: "close-after-duplicates"})
+	}, time.Minute)
+
+	env.ExecuteWorkflow(BillWorkflow, in)
+	assertBillWorkflowCompleted(t, env)
+	env.AssertExpectations(t)
+}
+
+func TestBillWorkflowPublishPendingRetriesFiveTimesThenSkipsPersistence(t *testing.T) {
+	env := newBillWorkflowTestEnvWithoutDefaultPublisher()
+	in := testBillInput()
+	item := testLineItem("ref-publish-failure", "USD")
+	row := testLedgerRow(in, item)
+
+	env.OnActivity(ActivityPublishPending, mock.Anything, row).
+		Return(errors.New("charge callback unavailable")).
+		Times(5)
+	env.OnActivity(ActivityPersistInvoice, mock.Anything, row.BillID).
+		Return(testClosedBillView(in), nil).
+		Once()
+
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow(chargecontract.SignalAddLineItem, item)
+	}, time.Millisecond)
+	env.RegisterDelayedCallback(func() {
+		env.SignalWorkflow(SignalCloseBill, CloseSignal{Reason: "close-after-publish-failure"})
+	}, time.Second)
+
+	env.ExecuteWorkflow(BillWorkflow, in)
+	assertBillWorkflowCompleted(t, env)
+	env.AssertExpectations(t)
+	env.AssertNumberOfCalls(t, ActivityPublishPending, 5)
+	env.AssertNumberOfCalls(t, ActivityPersistLineItem, 0)
 }
 
 func TestBillWorkflowAddLineItemSignalHandlesDuplicateNoop(t *testing.T) {
@@ -231,6 +291,7 @@ func TestBillWorkflowDropsCurrencyMismatchSignal(t *testing.T) {
 	env.ExecuteWorkflow(BillWorkflow, in)
 	assertBillWorkflowCompleted(t, env)
 	env.AssertExpectations(t)
+	env.AssertNumberOfCalls(t, ActivityPublishPending, 0)
 	env.AssertNumberOfCalls(t, ActivityPersistLineItem, 0)
 }
 
@@ -253,6 +314,7 @@ func TestBillWorkflowRejectsAddDuringClosing(t *testing.T) {
 	env.ExecuteWorkflow(BillWorkflow, in)
 	assertBillWorkflowCompleted(t, env)
 	env.AssertExpectations(t)
+	env.AssertNumberOfCalls(t, ActivityPublishPending, 0)
 	env.AssertNumberOfCalls(t, ActivityPersistLineItem, 0)
 }
 
@@ -286,6 +348,7 @@ func TestBillWorkflowRejectsAddDuringDraining(t *testing.T) {
 	env.ExecuteWorkflow(BillWorkflow, in)
 	assertBillWorkflowCompleted(t, env)
 	env.AssertExpectations(t)
+	env.AssertNumberOfCalls(t, ActivityPublishPending, 1)
 	env.AssertNumberOfCalls(t, ActivityPersistLineItem, 1)
 	env.AssertNotCalled(t, ActivityPersistLineItem, mock.Anything, rejectedRow)
 }
@@ -352,6 +415,7 @@ func TestBillWorkflowAutoCloseRejectsStragglerDuringSeal(t *testing.T) {
 	env.ExecuteWorkflow(BillWorkflow, in)
 	assertBillWorkflowCompleted(t, env)
 	env.AssertExpectations(t)
+	env.AssertNumberOfCalls(t, ActivityPublishPending, 0)
 	env.AssertNumberOfCalls(t, ActivityPersistLineItem, 0)
 }
 
@@ -446,11 +510,24 @@ func TestBillWorkflowCANWakesFromSignalActivity(t *testing.T) {
 }
 
 func newBillWorkflowTestEnv() *testsuite.TestWorkflowEnvironment {
+	env := newBillWorkflowTestEnvWithoutDefaultPublisher()
+	env.OnActivity(ActivityPublishPending, mock.Anything, mock.Anything).
+		Return(nil).
+		Maybe()
+	return env
+}
+
+func newBillWorkflowTestEnvWithoutDefaultPublisher() *testsuite.TestWorkflowEnvironment {
 	var suite testsuite.WorkflowTestSuite
 	env := suite.NewTestWorkflowEnvironment()
+	env.RegisterActivityWithOptions(mockPublishPendingActivity, activity.RegisterOptions{Name: ActivityPublishPending})
 	env.RegisterActivityWithOptions(mockPersistLineItemActivity, activity.RegisterOptions{Name: ActivityPersistLineItem})
 	env.RegisterActivityWithOptions(mockPersistInvoiceActivity, activity.RegisterOptions{Name: ActivityPersistInvoice})
 	return env
+}
+
+func mockPublishPendingActivity(context.Context, LedgerRow) error {
+	panic("mockPublishPendingActivity should be mocked in workflow tests")
 }
 
 func mockPersistLineItemActivity(context.Context, LedgerRow) (bool, error) {

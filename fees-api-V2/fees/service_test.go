@@ -205,6 +205,13 @@ func TestInitServiceSuccessRegistersAndStartsWorker(t *testing.T) {
 	if got := reflect.TypeOf(fakeWorker.activities[0]).String(); got != "*fees.Activities" {
 		t.Fatalf("registered activity type = %q, want *fees.Activities", got)
 	}
+	registeredActivities, ok := fakeWorker.activities[0].(*Activities)
+	if !ok {
+		t.Fatalf("registered activities = %T, want *Activities", fakeWorker.activities[0])
+	}
+	if registeredActivities.lineItemStatusClient == nil {
+		t.Fatal("registered activities has no line-item status client")
+	}
 	if svc.temporalConfig != defaultTemporalConfig() {
 		t.Fatalf("service config = %#v, want %#v", svc.temporalConfig, defaultTemporalConfig())
 	}
