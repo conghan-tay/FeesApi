@@ -1,0 +1,118 @@
+package charge
+
+import (
+	"context"
+	"net/http"
+	"regexp"
+	"strconv"
+
+	"encore.app/internal/chargecontract"
+	"encore.dev/beta/errs"
+	"encore.dev/rlog"
+)
+
+var currencyPattern = regexp.MustCompile(`^[A-Z]{3}$`)
+
+type AddLineItemRequest struct {
+	Reference   string `json:"reference"`
+	MinorAmount string `json:"minorAmount"`
+	Currency    string `json:"currency"`
+	FeeType     string `json:"feeType"`
+	Description string `json:"description"`
+}
+
+type AddLineItemResponse struct {
+	Reference  string `json:"reference"`
+	Applied    bool   `json:"applied"`
+	HTTPStatus int    `encore:"httpstatus"`
+}
+
+type APIErrorDetails struct {
+	Type string `json:"type"`
+}
+
+func (APIErrorDetails) ErrDetails() {}
+
+//encore:api public method=POST path=/v1/bills/:billId/line-items
+func (s *Service) AddLineItem(ctx context.Context, billId string, req *AddLineItemRequest) (*AddLineItemResponse, error) {
+	if billId == "" {
+		return nil, apiError(errs.InvalidArgument, "invalid-request", "billId is required")
+	}
+	if req == nil {
+		return nil, apiError(errs.InvalidArgument, "invalid-request", "request body is required")
+	}
+
+	lineItem, validationErr := validateAddLineItemRequest(*req)
+	if validationErr != "" {
+		return nil, apiError(errs.InvalidArgument, "invalid-request", validationErr)
+	}
+	if s == nil || s.temporalClient == nil {
+		return nil, addLineItemUnavailable()
+	}
+
+	if err := s.temporalClient.SignalWorkflow(
+		ctx,
+		billId,
+		"",
+		chargecontract.SignalAddLineItem,
+		lineItem,
+	); err != nil {
+		rlog.Error(
+			"add line item: temporal signal failed",
+			"billID", billId,
+			"reference", lineItem.Reference,
+			"problemType", "add-line-item-unavailable",
+			"err", err,
+		)
+		return nil, addLineItemUnavailable()
+	}
+
+	return &AddLineItemResponse{
+		Reference:  lineItem.Reference,
+		Applied:    true,
+		HTTPStatus: http.StatusAccepted,
+	}, nil
+}
+
+func validateAddLineItemRequest(input AddLineItemRequest) (chargecontract.LineItem, string) {
+	if input.Reference == "" {
+		return chargecontract.LineItem{}, "reference is required"
+	}
+	if input.MinorAmount == "" {
+		return chargecontract.LineItem{}, "minorAmount is required"
+	}
+	amountMinor, err := strconv.ParseInt(input.MinorAmount, 10, 64)
+	if err != nil {
+		return chargecontract.LineItem{}, "minorAmount must be an integer minor-unit amount encoded as a string"
+	}
+	if !currencyPattern.MatchString(input.Currency) {
+		return chargecontract.LineItem{}, "currency must be a three-letter uppercase ISO-4217 code"
+	}
+	if input.FeeType == "" {
+		return chargecontract.LineItem{}, "feeType is required"
+	}
+	return chargecontract.LineItem{
+		Reference:   input.Reference,
+		AmountMinor: amountMinor,
+		Currency:    input.Currency,
+		FeeType:     input.FeeType,
+		Description: input.Description,
+	}, ""
+}
+
+func addLineItemUnavailable() error {
+	return apiError(
+		errs.Unavailable,
+		"add-line-item-unavailable",
+		"add-line-item signal was not accepted; retry after a short delay",
+	)
+}
+
+func apiError(code errs.ErrCode, problemType, message string, metaPairs ...interface{}) error {
+	return errs.B().
+		Code(code).
+		Msg(message).
+		Details(APIErrorDetails{Type: problemType}).
+		Meta(metaPairs...).
+		Err()
+}

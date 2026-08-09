@@ -3,6 +3,8 @@ package fees
 import (
 	"fmt"
 	"time"
+
+	"encore.app/internal/chargecontract"
 )
 
 func billID(clientID, currency, period string) string {
@@ -49,7 +51,7 @@ func (s *BillState) carryForward() BillInput {
 	}
 }
 
-func ledgerRow(s *BillState, li LineItem) LedgerRow {
+func ledgerRow(s *BillState, li chargecontract.LineItem) LedgerRow {
 	return LedgerRow{
 		BillID:      billID(s.clientID, s.currency, s.period),
 		Reference:   li.Reference,

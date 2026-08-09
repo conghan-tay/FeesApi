@@ -3,6 +3,7 @@ package fees
 import (
 	"time"
 
+	"encore.app/internal/chargecontract"
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
 )
@@ -10,18 +11,23 @@ import (
 const (
 	BillWorkflowName = "BillWorkflow"
 
-	UpdateAddLineItem = "addLineItem"
-	SignalCloseBill   = "closeBill"
-	QueryGetBill      = "getBill"
+	SignalCloseBill = "closeBill"
+	QueryGetBill    = "getBill"
 )
+
+type lineItemSignalHandler struct {
+	signals  workflow.ReceiveChannel
+	done     workflow.Channel
+	inFlight int
+}
 
 func BillWorkflow(ctx workflow.Context, input BillInput) error {
 	log := workflow.GetLogger(ctx)
 	state := newBillState(input)
 
-	canCheckCh := workflow.NewBufferedChannel(ctx, 1)
-	if err := registerAddLineItem(ctx, state, canCheckCh); err != nil {
-		return err
+	lineItems := &lineItemSignalHandler{
+		signals: workflow.GetSignalChannel(ctx, chargecontract.SignalAddLineItem),
+		done:    workflow.NewBufferedChannel(ctx, 1),
 	}
 
 	if err := workflow.SetQueryHandler(ctx, QueryGetBill, func() (BillView, error) {
@@ -35,10 +41,9 @@ func BillWorkflow(ctx workflow.Context, input BillInput) error {
 	autoCloseTimer := workflow.NewTimer(timerCtx, resolvePeriodEnd(input.Period).Sub(workflow.Now(ctx)))
 
 	for state.status == OPEN {
-		if workflow.GetInfo(ctx).GetContinueAsNewSuggested() {
-			if err := workflow.Await(ctx, func() bool { return workflow.AllHandlersFinished(ctx) }); err != nil {
-				return err
-			}
+		if workflow.GetInfo(ctx).GetContinueAsNewSuggested() &&
+			lineItems.inFlight == 0 &&
+			len(workflow.GetUnhandledSignalNames(ctx)) == 0 {
 			cancelTimer()
 			return workflow.NewContinueAsNewError(ctx, BillWorkflow, state.carryForward())
 		}
@@ -55,64 +60,117 @@ func BillWorkflow(ctx workflow.Context, input BillInput) error {
 			log.Info("auto-close timer fired", "clientID", state.clientID, "period", state.period)
 			state.status = DRAINING
 		})
-		selector.AddReceive(canCheckCh, func(c workflow.ReceiveChannel, _ bool) {
+		selector.AddReceive(lineItems.signals, func(c workflow.ReceiveChannel, _ bool) {
+			var lineItem chargecontract.LineItem
+			c.Receive(ctx, &lineItem)
+			lineItems.start(ctx, state, lineItem)
+		})
+		selector.AddReceive(lineItems.done, func(c workflow.ReceiveChannel, _ bool) {
 			c.Receive(ctx, nil)
 		})
 		selector.Select(ctx)
 	}
 
-	return closeBill(ctx, state)
+	return closeBill(ctx, state, lineItems)
 }
 
-func registerAddLineItem(ctx workflow.Context, state *BillState, canCheckCh workflow.Channel) error {
-	return workflow.SetUpdateHandlerWithOptions(
-		ctx,
-		UpdateAddLineItem,
-		func(hctx workflow.Context, li LineItem) (LineItemResult, error) {
-			activityCtx := workflow.WithActivityOptions(hctx, workflow.ActivityOptions{
-				StartToCloseTimeout: 30 * time.Second,
-				RetryPolicy: &temporal.RetryPolicy{
-					InitialInterval:    time.Second,
-					BackoffCoefficient: 2.0,
-					MaximumInterval:    time.Minute,
-				},
-			})
+func (h *lineItemSignalHandler) start(ctx workflow.Context, state *BillState, li chargecontract.LineItem) {
+	log := workflow.GetLogger(ctx)
+	id := billID(state.clientID, state.currency, state.period)
+	if li.Currency != state.currency {
+		log.Error(
+			"add line item signal rejected",
+			"billID", id,
+			"reference", li.Reference,
+			"reason", "currency-mismatch",
+			"itemCurrency", li.Currency,
+			"billCurrency", state.currency,
+		)
+		return
+	}
+	if !state.status.acceptsAccruals() {
+		log.Error(
+			"add line item signal rejected",
+			"billID", id,
+			"reference", li.Reference,
+			"reason", "bill-not-open",
+			"status", state.status.String(),
+		)
+		return
+	}
 
-			var applied bool
-			if err := workflow.ExecuteActivity(activityCtx, ActivityPersistLineItem, ledgerRow(state, li)).
-				Get(activityCtx, &applied); err != nil {
-				workflow.GetLogger(hctx).Error("PersistLineItem failed", "reference", li.Reference, "err", err)
-				return LineItemResult{Reference: li.Reference}, err
-			}
+	h.inFlight++
+	workflow.Go(ctx, func(ctx workflow.Context) {
+		defer func() {
+			h.inFlight--
+			h.done.SendAsync(struct{}{})
+		}()
 
-			canCheckCh.SendAsync(struct{}{})
-			return LineItemResult{Reference: li.Reference, Applied: applied}, nil
-		},
-		workflow.UpdateHandlerOptions{
-			Validator: func(_ workflow.Context, li LineItem) error {
-				if li.Currency != state.currency {
-					return temporal.NewApplicationError(
-						"currency mismatch: item "+li.Currency+" != bill "+state.currency,
-						"CurrencyMismatch",
-					)
-				}
-				if !state.status.acceptsAccruals() {
-					return temporal.NewApplicationError(
-						"bill not accepting accruals (status "+state.status.String()+")",
-						"BillNotOpen",
-					)
-				}
-				return nil
+		activityCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
+			StartToCloseTimeout: 30 * time.Second,
+			RetryPolicy: &temporal.RetryPolicy{
+				InitialInterval:    time.Second,
+				BackoffCoefficient: 2.0,
+				MaximumInterval:    time.Minute,
 			},
-		},
-	)
+		})
+
+		var applied bool
+		if err := workflow.ExecuteActivity(activityCtx, ActivityPersistLineItem, ledgerRow(state, li)).
+			Get(activityCtx, &applied); err != nil {
+			workflow.GetLogger(ctx).Error(
+				"add line item signal failed",
+				"billID", id,
+				"reference", li.Reference,
+				"err", err,
+			)
+			return
+		}
+
+		workflow.GetLogger(ctx).Info(
+			"add line item signal processed",
+			"billID", id,
+			"reference", li.Reference,
+			"applied", applied,
+		)
+	})
 }
 
-func closeBill(ctx workflow.Context, state *BillState) error {
+func closeBill(ctx workflow.Context, state *BillState, lineItems *lineItemSignalHandler) error {
 	log := workflow.GetLogger(ctx)
 
-	if err := workflow.Await(ctx, func() bool { return workflow.AllHandlersFinished(ctx) }); err != nil {
-		return err
+	for {
+		var lineItem chargecontract.LineItem
+		if lineItems.signals.ReceiveAsync(&lineItem) {
+			log.Error(
+				"add line item signal rejected",
+				"billID", billID(state.clientID, state.currency, state.period),
+				"reference", lineItem.Reference,
+				"reason", "bill-not-open",
+				"status", state.status.String(),
+			)
+			continue
+		}
+		if lineItems.inFlight == 0 {
+			break
+		}
+
+		selector := workflow.NewSelector(ctx)
+		selector.AddReceive(lineItems.signals, func(c workflow.ReceiveChannel, _ bool) {
+			var rejected chargecontract.LineItem
+			c.Receive(ctx, &rejected)
+			log.Error(
+				"add line item signal rejected",
+				"billID", billID(state.clientID, state.currency, state.period),
+				"reference", rejected.Reference,
+				"reason", "bill-not-open",
+				"status", state.status.String(),
+			)
+		})
+		selector.AddReceive(lineItems.done, func(c workflow.ReceiveChannel, _ bool) {
+			c.Receive(ctx, nil)
+		})
+		selector.Select(ctx)
 	}
 
 	state.status = CLOSING

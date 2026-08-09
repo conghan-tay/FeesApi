@@ -5,7 +5,6 @@ import (
 	"errors"
 	"net/http"
 	"regexp"
-	"strconv"
 	"time"
 
 	"encore.dev/beta/errs"
@@ -97,14 +96,6 @@ type OpenBillResponse struct {
 	HTTPStatus       int        `encore:"httpstatus"`
 }
 
-type AddLineItemRequest struct {
-	Reference   string `json:"reference"`
-	MinorAmount string `json:"minorAmount"`
-	Currency    string `json:"currency"`
-	FeeType     string `json:"feeType"`
-	Description string `json:"description"`
-}
-
 type CloseBillRequest struct {
 	Reason string `json:"reason"`
 }
@@ -120,12 +111,6 @@ type ListBillsRequest struct {
 	Period   string             `query:"period"`
 	Cursor   string             `query:"cursor"`
 	Limit    option.Option[int] `query:"limit"`
-}
-
-type AddLineItemResponse struct {
-	Reference  string `json:"reference"`
-	Applied    bool   `json:"applied"`
-	HTTPStatus int    `encore:"httpstatus"`
 }
 
 type APIErrorDetails struct {
@@ -200,50 +185,6 @@ func (s *Service) OpenBill(ctx context.Context, req *OpenBillRequest) (*OpenBill
 		ClosedAt:         resource.ClosedAt,
 		Location:         "/v1/bills/" + id,
 		HTTPStatus:       http.StatusCreated,
-	}, nil
-}
-
-//encore:api public method=POST path=/v1/bills/:billId/line-items
-func (s *Service) AddLineItem(ctx context.Context, billId string, req *AddLineItemRequest) (*AddLineItemResponse, error) {
-	billID := billId
-	if billID == "" {
-		return nil, apiError(errs.InvalidArgument, "invalid-request", "billId is required")
-	}
-	if req == nil {
-		return nil, apiError(errs.InvalidArgument, "invalid-request", "request body is required")
-	}
-
-	lineItem, validationErr := validateAddLineItemRequest(*req)
-	if validationErr != "" {
-		return nil, apiError(errs.InvalidArgument, "invalid-request", validationErr)
-	}
-	if s == nil || s.temporalClient == nil {
-		return nil, apiError(errs.Unavailable, "add-line-item-unavailable", "add-line-item update did not complete; retry after a short delay")
-	}
-
-	handle, err := s.temporalClient.UpdateWorkflow(ctx, client.UpdateWorkflowOptions{
-		WorkflowID:   billID,
-		UpdateName:   UpdateAddLineItem,
-		Args:         []interface{}{lineItem},
-		WaitForStage: client.WorkflowUpdateStageCompleted,
-	})
-	if err != nil {
-		return nil, addLineItemTemporalError(ctx, billID, err)
-	}
-
-	var result LineItemResult
-	if err := handle.Get(ctx, &result); err != nil {
-		return nil, addLineItemTemporalError(ctx, billID, err)
-	}
-
-	status := http.StatusOK
-	if result.Applied {
-		status = http.StatusCreated
-	}
-	return &AddLineItemResponse{
-		Reference:  result.Reference,
-		Applied:    result.Applied,
-		HTTPStatus: status,
 	}, nil
 }
 
@@ -354,32 +295,6 @@ func validateOpenBillRequest(input OpenBillRequest) (BillInput, string) {
 	}, ""
 }
 
-func validateAddLineItemRequest(input AddLineItemRequest) (LineItem, string) {
-	if input.Reference == "" {
-		return LineItem{}, "reference is required"
-	}
-	if input.MinorAmount == "" {
-		return LineItem{}, "minorAmount is required"
-	}
-	amountMinor, err := strconv.ParseInt(input.MinorAmount, 10, 64)
-	if err != nil {
-		return LineItem{}, "minorAmount must be an integer minor-unit amount encoded as a string"
-	}
-	if !currencyPattern.MatchString(input.Currency) {
-		return LineItem{}, "currency must be a three-letter uppercase ISO-4217 code"
-	}
-	if input.FeeType == "" {
-		return LineItem{}, "feeType is required"
-	}
-	return LineItem{
-		Reference:   input.Reference,
-		AmountMinor: amountMinor,
-		Currency:    input.Currency,
-		FeeType:     input.FeeType,
-		Description: input.Description,
-	}, ""
-}
-
 func parseListBillsOptions(req *ListBillsRequest) (listBillsOptions, error) {
 	if req == nil {
 		return listBillsOptions{Limit: defaultListBillsLimit}, nil
@@ -424,43 +339,6 @@ func openTemporalError(err error) error {
 	}
 	rlog.Error("open bill: temporal update failed", "problemType", "open-unavailable", "err", err)
 	return apiError(errs.Unavailable, "open-unavailable", "open workflow did not complete; retry after a short delay")
-}
-
-func addLineItemTemporalError(ctx context.Context, billID string, err error) error {
-	var appErr *temporal.ApplicationError
-	if errors.As(err, &appErr) {
-		switch appErr.Type() {
-		case "CurrencyMismatch":
-			return apiError(errs.InvalidArgument, "currency-mismatch", "line item currency must match bill currency")
-		case "BillNotOpen":
-			return apiError(errs.Aborted, "bill-not-open", "bill is not accepting line items")
-		}
-	}
-
-	var notFoundErr *serviceerror.NotFound
-	if errors.As(err, &notFoundErr) {
-		return addLineItemNotFoundFallback(ctx, billID, err)
-	}
-
-	rlog.Error("add line item: temporal update failed", "problemType", "add-line-item-unavailable", "err", err)
-	return apiError(errs.Unavailable, "add-line-item-unavailable", "add-line-item update did not complete; retry after a short delay")
-}
-
-func addLineItemNotFoundFallback(ctx context.Context, billID string, temporalErr error) error {
-	resource, err := readBillResource(ctx, billID)
-	if errors.Is(err, sqldb.ErrNoRows) {
-		return apiError(errs.NotFound, "no-bill", "bill does not exist")
-	}
-	if err != nil {
-		rlog.Error("add line item: ledger fallback failed", "billID", billID, "problemType", "add-line-item-unavailable", "err", err)
-		return apiError(errs.Unavailable, "add-line-item-unavailable", "add-line-item update did not complete; retry after a short delay")
-	}
-	if resource.Status == CLOSED.String() {
-		return apiError(errs.Aborted, "bill-closed", "bill is closed and cannot accept line items")
-	}
-
-	rlog.Error("add line item: workflow missing for ledger bill", "billID", billID, "status", resource.Status, "problemType", "add-line-item-unavailable", "err", temporalErr)
-	return apiError(errs.Unavailable, "add-line-item-unavailable", "add-line-item update did not complete; retry after a short delay")
 }
 
 func closeTemporalError(ctx context.Context, id string, err error) (*InvoiceResource, error) {

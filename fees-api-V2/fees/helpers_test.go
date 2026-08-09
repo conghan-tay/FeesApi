@@ -4,6 +4,8 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"encore.app/internal/chargecontract"
 )
 
 func TestResolvePeriodEnd(t *testing.T) {
@@ -198,7 +200,7 @@ func TestLedgerRow(t *testing.T) {
 		period:   "2026-07",
 		status:   OPEN,
 	}
-	item := LineItem{
+	item := chargecontract.LineItem{
 		Reference:   "pay-svc-evt-98213",
 		AmountMinor: -1500,
 		Currency:    "USD",
