@@ -10,10 +10,10 @@
 
 ## Behavior
 
-- Explicit close performs ledger preflight, signals `closeBill`, waits for the workflow to complete, calls `SealBill`, and reports success only after Postgres confirms CLOSED.
+- Explicit close performs ledger preflight, signals `closeBill`, waits for the workflow to complete, and calls `SealBill`. The seal operation succeeds whether the guarded update changes one row or no rows.
 - Re-closing an already-CLOSED bill returns success without calling Temporal and does not change `closed_at`.
 - Temporal `NotFound` during Signal or result wait falls through to `SealBill`. This heals a completed-workflow/OPEN-ledger split, but can also seal an orphan OPEN row without proving workflow draining occurred.
-- Other Temporal and database failures remain redacted `503 close-unavailable` responses. Missing ledger bills remain `404 bill-not-found`.
+- Other Temporal and database failures remain redacted `503 close-unavailable` responses. Public close still returns `404 bill-not-found` when its initial ledger preflight finds no row; the private seal operation treats no matching row as idempotent success.
 - The workflow records whether close was explicit or timer-driven, drains in-flight line-item pipelines, and enters CLOSING. Only the timer path invokes `ActivityAutoCloseBill`; CLOSED is set after that Activity succeeds.
 
 ## Compatibility and Failure Effects
@@ -32,4 +32,3 @@
 - Workflow tests distinguish explicit from timer close, verify drain ordering, Activity retries, and the CLOSING state while sealing is in flight.
 - Activity and worker tests verify the typed `SealBill` call, error classification, registration of `ActivityAutoCloseBill`, and removal of `ActivityPersistInvoice`.
 - The E2E lifecycle verifies close/re-close success and reads invoice facts through GET.
-

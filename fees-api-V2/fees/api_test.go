@@ -990,7 +990,7 @@ func TestSealBillConcurrentCallsAreIdempotent(t *testing.T) {
 	}
 }
 
-func TestSealBillValidationMissingAndDatabaseFailure(t *testing.T) {
+func TestSealBillValidationNoMatchingRowAndDatabaseFailure(t *testing.T) {
 	svc := &Service{}
 	if _, err := svc.SealBill(context.Background(), nil); errs.Code(err) != errs.InvalidArgument {
 		t.Fatalf("nil request error code = %s, want invalid_argument", errs.Code(err))
@@ -998,8 +998,12 @@ func TestSealBillValidationMissingAndDatabaseFailure(t *testing.T) {
 
 	missingID := "bill-api-seal-missing-USD-2099-01"
 	cleanupActivityBill(t, context.Background(), missingID)
-	if _, err := svc.SealBill(context.Background(), &SealBillRequest{BillID: missingID}); errs.Code(err) != errs.NotFound {
-		t.Fatalf("missing bill error code = %s, want not_found", errs.Code(err))
+	resp, err := svc.SealBill(context.Background(), &SealBillRequest{BillID: missingID})
+	if err != nil {
+		t.Fatalf("missing bill SealBill returned error: %v", err)
+	}
+	if resp == nil || !resp.Success {
+		t.Fatalf("missing bill SealBill response = %#v, want success", resp)
 	}
 
 	canceledCtx, cancel := context.WithCancel(context.Background())

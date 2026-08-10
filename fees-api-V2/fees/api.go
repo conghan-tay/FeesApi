@@ -240,43 +240,16 @@ func (s *Service) SealBill(ctx context.Context, req *SealBillRequest) (*CloseBil
 	}
 
 	id := req.BillID
-	var out BillView
-	err := db.QueryRow(ctx, `
+	_, err := db.Exec(ctx, `
 		UPDATE bills
 		   SET status = 'CLOSED',
 		       closed_at = now()
 		 WHERE bill_id = $1
-		   AND status = 'OPEN'
-		RETURNING client_id, currency, period, status`,
+		   AND status = 'OPEN'`,
 		id,
-	).Scan(&out.ClientID, &out.Currency, &out.Period, &out.Status)
-	if err == nil {
-		if out.Status != CLOSED.String() {
-			rlog.Error("seal bill: update did not return closed status", "billID", id, "status", out.Status, "problemType", "close-unavailable")
-			return nil, apiError(errs.Unavailable, "close-unavailable", "close did not complete; retry after a short delay")
-		}
-		return &CloseBillResponse{Success: true}, nil
-	}
-	if !errors.Is(err, sqldb.ErrNoRows) {
-		rlog.Error("seal bill: update failed", "billID", id, "problemType", "close-unavailable", "err", err)
-		return nil, apiError(errs.Unavailable, "close-unavailable", "close did not complete; retry after a short delay")
-	}
-
-	err = db.QueryRow(ctx, `
-		SELECT client_id, currency, period, status
-		  FROM bills
-		 WHERE bill_id = $1`,
-		id,
-	).Scan(&out.ClientID, &out.Currency, &out.Period, &out.Status)
-	if errors.Is(err, sqldb.ErrNoRows) {
-		return nil, apiError(errs.NotFound, "bill-not-found", "bill does not exist")
-	}
+	)
 	if err != nil {
-		rlog.Error("seal bill: read existing bill failed", "billID", id, "problemType", "close-unavailable", "err", err)
-		return nil, apiError(errs.Unavailable, "close-unavailable", "close did not complete; retry after a short delay")
-	}
-	if out.Status != CLOSED.String() {
-		rlog.Error("seal bill: status was not closed", "billID", id, "status", out.Status, "problemType", "close-unavailable")
+		rlog.Error("seal bill: update failed", "billID", id, "problemType", "close-unavailable", "err", err)
 		return nil, apiError(errs.Unavailable, "close-unavailable", "close did not complete; retry after a short delay")
 	}
 	return &CloseBillResponse{Success: true}, nil
