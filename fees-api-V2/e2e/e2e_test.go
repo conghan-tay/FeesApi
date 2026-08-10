@@ -264,11 +264,15 @@ func waitForBillFacts(
 
 	var last *Response[BillResource]
 	for {
-		resp, err := client.GetBill(ctx, billID, false)
+		resp, err := client.GetBill(ctx, billID, true)
 		requireNoClientError(t, err)
 		requireStatus(t, resp, http.StatusOK)
 		last = resp
-		if resp.Body != nil && resp.Body.TotalMinorAmount == wantTotal && resp.Body.ItemCount == wantCount {
+		if resp.Body != nil &&
+			resp.Body.TotalMinorAmount == wantTotal &&
+			resp.Body.ItemCount == wantCount &&
+			len(resp.Body.LineItems) == wantCount &&
+			allLineItemsHaveStatus(resp.Body.LineItems, "FINALIZED") {
 			return resp
 		}
 
@@ -289,6 +293,15 @@ func waitForBillFacts(
 		case <-ticker.C:
 		}
 	}
+}
+
+func allLineItemsHaveStatus(items []LineItemResource, status string) bool {
+	for _, item := range items {
+		if item.Status != status {
+			return false
+		}
+	}
+	return true
 }
 
 func preflight(t *testing.T, ctx context.Context, client *Client) {

@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"strconv"
+	"time"
 
 	"encore.app/charge"
 	"encore.dev/storage/sqldb"
@@ -14,9 +16,11 @@ import (
 const (
 	ActivityPublishPending   = "ActivityPublishPending"
 	ActivityPublishFinalized = "ActivityPublishFinalized"
-	ActivityPersistLineItem  = "ActivityPersistLineItem"
+	ActivityLongRunning      = "ActivityLongRunning"
 	ActivityPersistInvoice   = "ActivityPersistInvoice"
 )
+
+const maxLongRunningDelay = 2 * time.Second
 
 type lineItemStatusPublisher interface {
 	PublishLineItemStatus(context.Context, *charge.PublishLineItemStatusRequest) error
@@ -28,15 +32,19 @@ func (encoreLineItemStatusPublisher) PublishLineItemStatus(ctx context.Context, 
 	return charge.PublishLineItemStatus(ctx, req)
 }
 
+type longRunningOperation func(context.Context, LedgerRow) error
+
 type Activities struct {
 	db                   *sqldb.Database
 	lineItemStatusClient lineItemStatusPublisher
+	longRunningOperation longRunningOperation
 }
 
 func NewActivities(db *sqldb.Database) *Activities {
 	return &Activities{
 		db:                   db,
 		lineItemStatusClient: encoreLineItemStatusPublisher{},
+		longRunningOperation: simulateLongRunningTransaction,
 	}
 }
 
@@ -82,52 +90,38 @@ func (a *Activities) ActivityPublishFinalized(ctx context.Context, row LedgerRow
 	return nil
 }
 
-func (a *Activities) ActivityPersistLineItem(ctx context.Context, row LedgerRow) (bool, error) {
-	tag, err := a.db.Exec(ctx, `
-		INSERT INTO line_items
-			(bill_id, reference, amount_minor, currency, fee_type, description, status)
-		SELECT $1, $2, $3, $4, $5, $6, 'FINALIZED'
-		 WHERE EXISTS (
-			SELECT 1
-			  FROM bills
-			 WHERE bill_id = $1
-			   AND status = 'OPEN'
-		 )
-		ON CONFLICT (bill_id, reference) DO NOTHING`,
-		row.BillID,
-		row.Reference,
-		row.AmountMinor,
-		row.Currency,
-		row.FeeType,
-		row.Description,
-	)
-	if err != nil {
-		return false, fmt.Errorf("insert line item: %w", err)
+func (a *Activities) ActivityLongRunning(ctx context.Context, row LedgerRow) error {
+	if a == nil || a.longRunningOperation == nil {
+		return errors.New("long running transaction: operation is not configured")
+	}
+	if err := a.longRunningOperation(ctx, row); err != nil {
+		return fmt.Errorf("long running transaction: %w", err)
+	}
+	return nil
+}
+
+func simulateLongRunningTransaction(ctx context.Context, _ LedgerRow) error {
+	return waitForLongRunningTransaction(ctx, randomLongRunningDelay())
+}
+
+func randomLongRunningDelay() time.Duration {
+	return time.Duration(rand.Int64N(int64(maxLongRunningDelay) + 1))
+}
+
+func waitForLongRunningTransaction(ctx context.Context, delay time.Duration) error {
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 
-	if tag.RowsAffected() == 1 {
-		return true, nil
-	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
 
-	var exists bool
-	if err := a.db.QueryRow(ctx, `
-		SELECT EXISTS (
-			SELECT 1
-			  FROM line_items
-			 WHERE bill_id = $1
-			   AND reference = $2
-		)`,
-		row.BillID,
-		row.Reference,
-	).Scan(&exists); err != nil {
-		return false, fmt.Errorf("disambiguate line item insert: %w", err)
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
-	if exists {
-		return false, nil
-	}
-
-	return false, temporalNonRetryable(
-		fmt.Errorf("bill %s not OPEN; cannot apply line item %s", row.BillID, row.Reference))
 }
 
 func (a *Activities) ActivityPersistInvoice(ctx context.Context, billID string) (BillView, error) {

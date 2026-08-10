@@ -135,11 +135,10 @@ func (h *lineItemSignalHandler) start(ctx workflow.Context, state *BillState, li
 				MaximumInterval:    time.Minute,
 			},
 		})
-		var applied bool
-		if err := workflow.ExecuteActivity(activityCtx, ActivityPersistLineItem, row).
-			Get(activityCtx, &applied); err != nil {
+		if err := workflow.ExecuteActivity(activityCtx, ActivityLongRunning, row).
+			Get(activityCtx, nil); err != nil {
 			workflow.GetLogger(ctx).Error(
-				"add line item signal failed",
+				"long running transaction failed",
 				"billID", id,
 				"reference", li.Reference,
 				"err", err,
@@ -148,10 +147,9 @@ func (h *lineItemSignalHandler) start(ctx workflow.Context, state *BillState, li
 		}
 
 		workflow.GetLogger(ctx).Info(
-			"add line item signal processed",
+			"long running transaction completed",
 			"billID", id,
 			"reference", li.Reference,
-			"applied", applied,
 		)
 
 		if err := workflow.ExecuteActivity(publishCtx, ActivityPublishFinalized, row).

@@ -217,6 +217,7 @@ func TestPublishLineItemStatusAcceptsSupportedStatusesAndStringAmounts(t *testin
 				FeeType:     req.FeeType,
 				Description: req.Description,
 				Status:      req.Status,
+				OrderingID:  req.BillID + "-" + req.Reference,
 			}
 			if got := eventPublisher.events[0]; got != want {
 				t.Fatalf("published event = %#v, want %#v", got, want)
@@ -247,6 +248,7 @@ func TestPublishLineItemStatusPublishesToUpdateLineItemsTopic(t *testing.T) {
 		FeeType:     req.FeeType,
 		Description: req.Description,
 		Status:      req.Status,
+		OrderingID:  req.BillID + "-" + req.Reference,
 	}
 	if !reflect.DeepEqual(messages[0], want) {
 		t.Fatalf("published message = %#v, want %#v", messages[0], want)
@@ -261,16 +263,16 @@ func TestUpdateLineItemsTopicConfiguration(t *testing.T) {
 	if meta.Config.DeliveryGuarantee != pubsub.AtLeastOnce {
 		t.Fatalf("delivery guarantee = %v, want AtLeastOnce", meta.Config.DeliveryGuarantee)
 	}
-	if meta.Config.OrderingAttribute != "" {
-		t.Fatalf("ordering attribute = %q, want empty", meta.Config.OrderingAttribute)
+	if meta.Config.OrderingAttribute != "ordering-id" {
+		t.Fatalf("ordering attribute = %q, want ordering-id", meta.Config.OrderingAttribute)
 	}
 }
 
 func TestLineItemEventMatchesPublishLineItemStatusRequestContract(t *testing.T) {
 	requestType := reflect.TypeOf(PublishLineItemStatusRequest{})
 	eventType := reflect.TypeOf(LineItemEvent{})
-	if eventType.NumField() != requestType.NumField() {
-		t.Fatalf("LineItemEvent fields = %d, want %d", eventType.NumField(), requestType.NumField())
+	if eventType.NumField() != requestType.NumField()+1 {
+		t.Fatalf("LineItemEvent fields = %d, want request fields plus OrderingID", eventType.NumField())
 	}
 	for i := 0; i < requestType.NumField(); i++ {
 		requestField := requestType.Field(i)
@@ -284,6 +286,16 @@ func TestLineItemEventMatchesPublishLineItemStatusRequestContract(t *testing.T) 
 		if eventField.Tag != requestField.Tag {
 			t.Errorf("field %s tag = %q, want %q", requestField.Name, eventField.Tag, requestField.Tag)
 		}
+	}
+	orderingField := eventType.Field(eventType.NumField() - 1)
+	if orderingField.Name != "OrderingID" || orderingField.Type.Kind() != reflect.String {
+		t.Fatalf("ordering field = %s %v, want OrderingID string", orderingField.Name, orderingField.Type)
+	}
+	if got := orderingField.Tag.Get("json"); got != "orderingId" {
+		t.Fatalf("OrderingID json tag = %q, want orderingId", got)
+	}
+	if got := orderingField.Tag.Get("pubsub-attr"); got != "ordering-id" {
+		t.Fatalf("OrderingID pubsub-attr tag = %q, want ordering-id", got)
 	}
 }
 

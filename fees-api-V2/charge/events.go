@@ -12,8 +12,10 @@ type LineItemEvent struct {
 	FeeType     string `json:"feeType"`
 	Description string `json:"description"`
 	Status      string `json:"status"`
+	OrderingID  string `json:"orderingId" pubsub-attr:"ordering-id"`
 }
 
 var UpdateLineItems = pubsub.NewTopic[*LineItemEvent]("update-line-items", pubsub.TopicConfig{
 	DeliveryGuarantee: pubsub.AtLeastOnce,
+	OrderingAttribute: "ordering-id",
 })

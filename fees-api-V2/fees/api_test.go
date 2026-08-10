@@ -121,7 +121,7 @@ func TestGetBillWithLineItemsIncludesOrderedItems(t *testing.T) {
 	}
 }
 
-func TestLineItemStatusesAreExposedAndAllContributeToAggregates(t *testing.T) {
+func TestLineItemStatusesAreExposedAndOnlyFinalizedContributeToAggregates(t *testing.T) {
 	ctx := context.Background()
 	clientID := "api-line-statuses"
 	billID := "bill-api-line-statuses-USD-2099-01"
@@ -149,8 +149,8 @@ func TestLineItemStatusesAreExposedAndAllContributeToAggregates(t *testing.T) {
 	if err := json.Unmarshal(summaryResp.Body.Bytes(), &summary); err != nil {
 		t.Fatalf("decode summary response: %v", err)
 	}
-	if summary.TotalMinorAmount != "250" || summary.ItemCount != 3 {
-		t.Fatalf("summary total/count = %s/%d, want 250/3", summary.TotalMinorAmount, summary.ItemCount)
+	if summary.TotalMinorAmount != "200" || summary.ItemCount != 1 {
+		t.Fatalf("summary total/count = %s/%d, want finalized-only 200/1", summary.TotalMinorAmount, summary.ItemCount)
 	}
 
 	detailResp := performGetBill(t, &Service{}, billID, "true")
@@ -158,8 +158,8 @@ func TestLineItemStatusesAreExposedAndAllContributeToAggregates(t *testing.T) {
 		t.Fatalf("detail status = %d, want 200. Body: %s", detailResp.Code, detailResp.Body.String())
 	}
 	detail := decodeInvoiceResource(t, detailResp)
-	if detail.TotalMinorAmount != "250" || detail.ItemCount != 3 || len(detail.LineItems) != 3 {
-		t.Fatalf("detail total/count/items = %s/%d/%d, want 250/3/3", detail.TotalMinorAmount, detail.ItemCount, len(detail.LineItems))
+	if detail.TotalMinorAmount != "200" || detail.ItemCount != 1 || len(detail.LineItems) != 3 {
+		t.Fatalf("detail total/count/items = %s/%d/%d, want finalized-only 200/1 with all 3 items visible", detail.TotalMinorAmount, detail.ItemCount, len(detail.LineItems))
 	}
 	for i, item := range items {
 		if detail.LineItems[i].Reference != item.reference || detail.LineItems[i].Status != item.status {
@@ -172,8 +172,8 @@ func TestLineItemStatusesAreExposedAndAllContributeToAggregates(t *testing.T) {
 		t.Fatalf("list status = %d, want 200. Body: %s", listResp.Code, listResp.Body.String())
 	}
 	listed := decodeListBillsResponse(t, listResp)
-	if len(listed.Bills) != 1 || listed.Bills[0].TotalMinorAmount != "250" || listed.Bills[0].ItemCount != 3 {
-		t.Fatalf("listed bills = %#v, want one bill with total/count 250/3", listed.Bills)
+	if len(listed.Bills) != 1 || listed.Bills[0].TotalMinorAmount != "200" || listed.Bills[0].ItemCount != 1 {
+		t.Fatalf("listed bills = %#v, want one bill with finalized-only total/count 200/1", listed.Bills)
 	}
 }
 

@@ -110,6 +110,7 @@ func (s *Service) PublishLineItemStatus(ctx context.Context, req *PublishLineIte
 		FeeType:     req.FeeType,
 		Description: req.Description,
 		Status:      req.Status,
+		OrderingID:  req.BillID + "-" + req.Reference,
 	})
 	if err != nil {
 		rlog.Error(
