@@ -6,11 +6,14 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
 	"encore.app/internal/chargecontract"
 	"encore.dev/beta/errs"
+	"encore.dev/et"
+	"encore.dev/pubsub"
 	"go.temporal.io/api/serviceerror"
 )
 
@@ -25,6 +28,19 @@ type recordedSignal struct {
 	runID      string
 	name       string
 	arg        interface{}
+}
+
+type recordingLineItemEventPublisher struct {
+	err       error
+	events    []LineItemEvent
+	messageID string
+}
+
+func (p *recordingLineItemEventPublisher) Publish(_ context.Context, event *LineItemEvent) (string, error) {
+	if event != nil {
+		p.events = append(p.events, *event)
+	}
+	return p.messageID, p.err
 }
 
 func (c *recordingTemporalClient) Close() {
@@ -175,7 +191,8 @@ func TestPublishLineItemStatusAcceptsSupportedStatusesAndStringAmounts(t *testin
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			temporalClient := &recordingTemporalClient{}
-			svc := &Service{temporalClient: temporalClient}
+			eventPublisher := &recordingLineItemEventPublisher{messageID: "msg-status"}
+			svc := &Service{temporalClient: temporalClient, lineItemEvents: eventPublisher}
 			req := validPublishLineItemStatusRequest(tt.amount, tt.status)
 
 			resp := performPublishLineItemStatus(t, svc, &req)
@@ -189,8 +206,107 @@ func TestPublishLineItemStatusAcceptsSupportedStatusesAndStringAmounts(t *testin
 			if len(temporalClient.signals) != 0 {
 				t.Fatalf("SignalWorkflow calls = %d, want 0", len(temporalClient.signals))
 			}
+			if len(eventPublisher.events) != 1 {
+				t.Fatalf("published events = %d, want 1", len(eventPublisher.events))
+			}
+			want := LineItemEvent{
+				BillID:      req.BillID,
+				Reference:   req.Reference,
+				MinorAmount: req.MinorAmount,
+				Currency:    req.Currency,
+				FeeType:     req.FeeType,
+				Description: req.Description,
+				Status:      req.Status,
+			}
+			if got := eventPublisher.events[0]; got != want {
+				t.Fatalf("published event = %#v, want %#v", got, want)
+			}
 		})
 	}
+}
+
+func TestPublishLineItemStatusPublishesToUpdateLineItemsTopic(t *testing.T) {
+	req := validPublishLineItemStatusRequest("1500", LineItemStatusPending)
+	publisher := pubsub.TopicRef[pubsub.Publisher[*LineItemEvent]](UpdateLineItems)
+	svc := &Service{lineItemEvents: publisher}
+
+	resp := performPublishLineItemStatus(t, svc, &req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200. Body: %s", resp.Code, resp.Body.String())
+	}
+	messages := et.Topic(UpdateLineItems).PublishedMessages()
+	if len(messages) != 1 {
+		t.Fatalf("published messages = %d, want 1", len(messages))
+	}
+	want := &LineItemEvent{
+		BillID:      req.BillID,
+		Reference:   req.Reference,
+		MinorAmount: req.MinorAmount,
+		Currency:    req.Currency,
+		FeeType:     req.FeeType,
+		Description: req.Description,
+		Status:      req.Status,
+	}
+	if !reflect.DeepEqual(messages[0], want) {
+		t.Fatalf("published message = %#v, want %#v", messages[0], want)
+	}
+}
+
+func TestUpdateLineItemsTopicConfiguration(t *testing.T) {
+	meta := UpdateLineItems.Meta()
+	if meta.Name != "update-line-items" {
+		t.Fatalf("topic name = %q, want update-line-items", meta.Name)
+	}
+	if meta.Config.DeliveryGuarantee != pubsub.AtLeastOnce {
+		t.Fatalf("delivery guarantee = %v, want AtLeastOnce", meta.Config.DeliveryGuarantee)
+	}
+	if meta.Config.OrderingAttribute != "" {
+		t.Fatalf("ordering attribute = %q, want empty", meta.Config.OrderingAttribute)
+	}
+}
+
+func TestLineItemEventMatchesPublishLineItemStatusRequestContract(t *testing.T) {
+	requestType := reflect.TypeOf(PublishLineItemStatusRequest{})
+	eventType := reflect.TypeOf(LineItemEvent{})
+	if eventType.NumField() != requestType.NumField() {
+		t.Fatalf("LineItemEvent fields = %d, want %d", eventType.NumField(), requestType.NumField())
+	}
+	for i := 0; i < requestType.NumField(); i++ {
+		requestField := requestType.Field(i)
+		eventField := eventType.Field(i)
+		if eventField.Name != requestField.Name {
+			t.Errorf("field %d name = %q, want %q", i, eventField.Name, requestField.Name)
+		}
+		if eventField.Type != requestField.Type {
+			t.Errorf("field %s type = %v, want %v", requestField.Name, eventField.Type, requestField.Type)
+		}
+		if eventField.Tag != requestField.Tag {
+			t.Errorf("field %s tag = %q, want %q", requestField.Name, eventField.Tag, requestField.Tag)
+		}
+	}
+}
+
+func TestPublishLineItemStatusPublishFailureReturnsRedacted503(t *testing.T) {
+	publishErr := errors.New("broker at 10.0.4.23 refused connection")
+	eventPublisher := &recordingLineItemEventPublisher{err: publishErr}
+	req := validPublishLineItemStatusRequest("1500", LineItemStatusPending)
+
+	resp := performPublishLineItemStatus(t, &Service{lineItemEvents: eventPublisher}, &req)
+
+	assertProblem(t, resp, "line-item-status-unavailable", http.StatusServiceUnavailable)
+	if strings.Contains(resp.Body.String(), publishErr.Error()) {
+		t.Fatalf("problem response leaked %q: %s", publishErr.Error(), resp.Body.String())
+	}
+	if len(eventPublisher.events) != 1 {
+		t.Fatalf("publish attempts = %d, want 1", len(eventPublisher.events))
+	}
+}
+
+func TestPublishLineItemStatusNilPublisherReturns503(t *testing.T) {
+	req := validPublishLineItemStatusRequest("1500", LineItemStatusPending)
+	resp := performPublishLineItemStatus(t, &Service{}, &req)
+	assertProblem(t, resp, "line-item-status-unavailable", http.StatusServiceUnavailable)
 }
 
 func TestPublishLineItemStatusValidationFailuresReturn400(t *testing.T) {
@@ -215,11 +331,15 @@ func TestPublishLineItemStatusValidationFailuresReturn400(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			temporalClient := &recordingTemporalClient{}
-			resp := performPublishLineItemStatus(t, &Service{temporalClient: temporalClient}, tt.body)
+			eventPublisher := &recordingLineItemEventPublisher{}
+			resp := performPublishLineItemStatus(t, &Service{temporalClient: temporalClient, lineItemEvents: eventPublisher}, tt.body)
 
 			assertProblem(t, resp, "invalid-request", http.StatusBadRequest)
 			if len(temporalClient.signals) != 0 {
 				t.Fatalf("SignalWorkflow calls = %d, want 0", len(temporalClient.signals))
+			}
+			if len(eventPublisher.events) != 0 {
+				t.Fatalf("published events = %d, want 0", len(eventPublisher.events))
 			}
 		})
 	}
