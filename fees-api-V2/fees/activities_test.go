@@ -2,19 +2,32 @@ package fees
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"strconv"
 	"testing"
 	"time"
 
 	"encore.app/charge"
+	apierrs "encore.dev/beta/errs"
 	"go.temporal.io/sdk/temporal"
 )
 
 type recordingLineItemStatusPublisher struct {
 	err      error
 	requests []charge.PublishLineItemStatusRequest
+}
+
+type recordingBillSealClient struct {
+	response *CloseBillResponse
+	err      error
+	requests []SealBillRequest
+}
+
+func (c *recordingBillSealClient) SealBill(_ context.Context, req *SealBillRequest) (*CloseBillResponse, error) {
+	if req != nil {
+		c.requests = append(c.requests, *req)
+	}
+	return c.response, c.err
 }
 
 func (p *recordingLineItemStatusPublisher) PublishLineItemStatus(_ context.Context, req *charge.PublishLineItemStatusRequest) error {
@@ -206,115 +219,60 @@ func TestRandomLongRunningDelayStaysWithinContinuousRange(t *testing.T) {
 	}
 }
 
-func TestActivityPersistInvoiceSealsOpenBill(t *testing.T) {
-	ctx := context.Background()
-	activities := NewActivities(db)
-	billID := "bill-activity-seal-open-USD-2099-01"
-	cleanupActivityBill(t, ctx, billID)
-	seedActivityBill(t, ctx, billID, "activity-seal-open", "USD", "2099-01", "OPEN", nil)
+func TestActivityAutoCloseBillCallsSealEndpoint(t *testing.T) {
+	billID := "bill-activity-auto-close-USD-2099-01"
+	client := &recordingBillSealClient{response: &CloseBillResponse{Success: true}}
+	activities := &Activities{billSealClient: client}
 
-	view, err := activities.ActivityPersistInvoice(ctx, billID)
-	if err != nil {
-		t.Fatalf("ActivityPersistInvoice returned error: %v", err)
+	if err := activities.ActivityAutoCloseBill(context.Background(), billID); err != nil {
+		t.Fatalf("ActivityAutoCloseBill returned error: %v", err)
 	}
-	if view != (BillView{ClientID: "activity-seal-open", Currency: "USD", Period: "2099-01", Status: "CLOSED"}) {
-		t.Fatalf("BillView = %#v, want sealed identity/status", view)
-	}
-
-	var status string
-	var closedAt sql.NullTime
-	if err := db.QueryRow(ctx, `
-		SELECT status, closed_at
-		  FROM bills
-		 WHERE bill_id = $1`,
-		billID,
-	).Scan(&status, &closedAt); err != nil {
-		t.Fatalf("query sealed bill: %v", err)
-	}
-	if status != "CLOSED" {
-		t.Fatalf("status = %q, want CLOSED", status)
-	}
-	if !closedAt.Valid {
-		t.Fatal("closed_at is NULL, want timestamp")
+	if len(client.requests) != 1 || client.requests[0] != (SealBillRequest{BillID: billID}) {
+		t.Fatalf("seal requests = %#v, want exact bill ID", client.requests)
 	}
 }
 
-func TestActivityPersistInvoiceZeroItemBillReadsAsEmptyInvoice(t *testing.T) {
-	ctx := context.Background()
-	activities := NewActivities(db)
-	billID := "bill-activity-seal-zero-USD-2099-01"
-	cleanupActivityBill(t, ctx, billID)
-	seedActivityBill(t, ctx, billID, "activity-seal-zero", "USD", "2099-01", "OPEN", nil)
-
-	if _, err := activities.ActivityPersistInvoice(ctx, billID); err != nil {
-		t.Fatalf("ActivityPersistInvoice zero-item bill returned error: %v", err)
+func TestActivityAutoCloseBillPropagatesRetryableFailures(t *testing.T) {
+	sealErr := errors.New("seal endpoint unavailable")
+	client := &recordingBillSealClient{err: sealErr}
+	err := (&Activities{billSealClient: client}).ActivityAutoCloseBill(context.Background(), "bill-retry")
+	if !errors.Is(err, sealErr) {
+		t.Fatalf("ActivityAutoCloseBill error = %v, want wrapped %v", err, sealErr)
 	}
 
-	invoice, err := readClosedInvoiceResource(ctx, billID)
-	if err != nil {
-		t.Fatalf("read sealed zero-item invoice: %v", err)
-	}
-	if invoice.Status != "CLOSED" {
-		t.Fatalf("status = %q, want CLOSED", invoice.Status)
-	}
-	if invoice.TotalMinorAmount != "0" || invoice.ItemCount != 0 {
-		t.Fatalf("total/count = %s/%d, want 0/0", invoice.TotalMinorAmount, invoice.ItemCount)
-	}
-	if invoice.ClosedAt == nil {
-		t.Fatal("closedAt is nil, want seal timestamp")
-	}
-	if invoice.LineItems == nil {
-		t.Fatal("lineItems is nil, want empty slice")
-	}
-	if len(invoice.LineItems) != 0 {
-		t.Fatalf("lineItems length = %d, want 0", len(invoice.LineItems))
+	for name, response := range map[string]*CloseBillResponse{
+		"nil response":   nil,
+		"false response": {Success: false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := (&Activities{billSealClient: &recordingBillSealClient{response: response}}).
+				ActivityAutoCloseBill(context.Background(), "bill-unconfirmed")
+			if err == nil {
+				t.Fatal("ActivityAutoCloseBill returned nil error for unconfirmed response")
+			}
+		})
 	}
 }
 
-func TestActivityPersistInvoiceIsIdempotentForClosedBill(t *testing.T) {
-	ctx := context.Background()
-	activities := NewActivities(db)
-	billID := "bill-activity-seal-closed-USD-2099-01"
-	closedAt := time.Date(2099, 2, 1, 0, 0, 0, 0, time.UTC)
-	cleanupActivityBill(t, ctx, billID)
-	seedActivityBill(t, ctx, billID, "activity-seal-closed", "USD", "2099-01", "CLOSED", &closedAt)
-
-	view, err := activities.ActivityPersistInvoice(ctx, billID)
-	if err != nil {
-		t.Fatalf("ActivityPersistInvoice re-close returned error: %v", err)
-	}
-	if view != (BillView{ClientID: "activity-seal-closed", Currency: "USD", Period: "2099-01", Status: "CLOSED"}) {
-		t.Fatalf("BillView = %#v, want existing sealed identity/status", view)
-	}
-
-	var gotClosedAt time.Time
-	if err := db.QueryRow(ctx, `
-		SELECT closed_at
-		  FROM bills
-		 WHERE bill_id = $1`,
-		billID,
-	).Scan(&gotClosedAt); err != nil {
-		t.Fatalf("query re-closed bill: %v", err)
-	}
-	if !gotClosedAt.Equal(closedAt) {
-		t.Fatalf("closed_at = %s, want unchanged %s", gotClosedAt.Format(time.RFC3339Nano), closedAt.Format(time.RFC3339Nano))
+func TestActivityAutoCloseBillRejectsMissingClient(t *testing.T) {
+	if err := (&Activities{}).ActivityAutoCloseBill(context.Background(), "bill-missing-client"); err == nil {
+		t.Fatal("ActivityAutoCloseBill returned nil error with no seal client")
 	}
 }
 
-func TestActivityPersistInvoiceRejectsMissingBill(t *testing.T) {
-	ctx := context.Background()
-	activities := NewActivities(db)
-	billID := "bill-activity-seal-missing-USD-2099-01"
-	cleanupActivityBill(t, ctx, billID)
+func TestActivityAutoCloseBillMakesMissingBillNonRetryable(t *testing.T) {
+	client := &recordingBillSealClient{
+		err: apiError(apierrs.NotFound, "bill-not-found", "bill does not exist"),
+	}
+	err := (&Activities{billSealClient: client}).ActivityAutoCloseBill(context.Background(), "bill-missing")
 
-	view, err := activities.ActivityPersistInvoice(ctx, billID)
-	if err == nil {
-		t.Fatal("ActivityPersistInvoice on missing bill returned nil error")
+	var appErr *temporal.ApplicationError
+	if !errors.As(err, &appErr) {
+		t.Fatalf("error = %T %v, want temporal ApplicationError", err, err)
 	}
-	if view != (BillView{}) {
-		t.Fatalf("BillView = %#v, want zero value", view)
+	if appErr.Type() != "BillNotFound" || !appErr.NonRetryable() {
+		t.Fatalf("application error type/nonRetryable = %q/%v, want BillNotFound/true", appErr.Type(), appErr.NonRetryable())
 	}
-	assertBillNotOpenError(t, err)
 }
 
 func cleanupActivityBill(t *testing.T, ctx context.Context, billID string) {
@@ -406,20 +364,5 @@ func assertActivityBillRow(t *testing.T, ctx context.Context, billID, clientID, 
 	}
 	if gotCount != wantCount {
 		t.Fatalf("bill row count for %s = %d, want %d", billID, gotCount, wantCount)
-	}
-}
-
-func assertBillNotOpenError(t *testing.T, err error) {
-	t.Helper()
-
-	var appErr *temporal.ApplicationError
-	if !errors.As(err, &appErr) {
-		t.Fatalf("error = %T %v, want temporal ApplicationError", err, err)
-	}
-	if appErr.Type() != "BillNotOpen" {
-		t.Fatalf("application error type = %q, want BillNotOpen", appErr.Type())
-	}
-	if !appErr.NonRetryable() {
-		t.Fatal("application error is retryable, want non-retryable")
 	}
 }

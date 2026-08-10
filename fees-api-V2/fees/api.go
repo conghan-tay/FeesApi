@@ -100,6 +100,14 @@ type CloseBillRequest struct {
 	Reason string `json:"reason"`
 }
 
+type CloseBillResponse struct {
+	Success bool `json:"success"`
+}
+
+type SealBillRequest struct {
+	BillID string `json:"billId"`
+}
+
 type GetBillRequest struct {
 	IncludeLineItems bool `query:"includeLineItems"`
 }
@@ -189,7 +197,7 @@ func (s *Service) OpenBill(ctx context.Context, req *OpenBillRequest) (*OpenBill
 }
 
 //encore:api public method=POST path=/v1/bills/:billId/close
-func (s *Service) CloseBill(ctx context.Context, billId string, req *CloseBillRequest) (*InvoiceResource, error) {
+func (s *Service) CloseBill(ctx context.Context, billId string, req *CloseBillRequest) (*CloseBillResponse, error) {
 	id := billId
 	if id == "" {
 		return nil, apiError(errs.InvalidArgument, "invalid-request", "billId is required")
@@ -209,29 +217,69 @@ func (s *Service) CloseBill(ctx context.Context, billId string, req *CloseBillRe
 	}
 
 	if resource.Status == CLOSED.String() {
-		return closedInvoice(ctx, id)
+		return &CloseBillResponse{Success: true}, nil
 	}
 	if s == nil || s.temporalClient == nil {
 		return nil, apiError(errs.Unavailable, "close-unavailable", "close did not complete; retry after a short delay")
 	}
 
 	if err := s.temporalClient.SignalWorkflow(ctx, id, "", SignalCloseBill, CloseSignal{Reason: input.Reason}); err != nil {
-		return closeTemporalError(ctx, id, err)
+		return s.closeTemporalError(ctx, id, err)
 	}
 	if err := s.temporalClient.GetWorkflow(ctx, id, "").Get(ctx, nil); err != nil {
-		return closeTemporalError(ctx, id, err)
+		return s.closeTemporalError(ctx, id, err)
 	}
 
-	sealed, err := readBillResource(ctx, id)
+	return s.SealBill(ctx, &SealBillRequest{BillID: id})
+}
+
+//encore:api private
+func (s *Service) SealBill(ctx context.Context, req *SealBillRequest) (*CloseBillResponse, error) {
+	if req == nil || req.BillID == "" {
+		return nil, apiError(errs.InvalidArgument, "invalid-request", "billId is required")
+	}
+
+	id := req.BillID
+	var out BillView
+	err := db.QueryRow(ctx, `
+		UPDATE bills
+		   SET status = 'CLOSED',
+		       closed_at = now()
+		 WHERE bill_id = $1
+		   AND status = 'OPEN'
+		RETURNING client_id, currency, period, status`,
+		id,
+	).Scan(&out.ClientID, &out.Currency, &out.Period, &out.Status)
+	if err == nil {
+		if out.Status != CLOSED.String() {
+			rlog.Error("seal bill: update did not return closed status", "billID", id, "status", out.Status, "problemType", "close-unavailable")
+			return nil, apiError(errs.Unavailable, "close-unavailable", "close did not complete; retry after a short delay")
+		}
+		return &CloseBillResponse{Success: true}, nil
+	}
+	if !errors.Is(err, sqldb.ErrNoRows) {
+		rlog.Error("seal bill: update failed", "billID", id, "problemType", "close-unavailable", "err", err)
+		return nil, apiError(errs.Unavailable, "close-unavailable", "close did not complete; retry after a short delay")
+	}
+
+	err = db.QueryRow(ctx, `
+		SELECT client_id, currency, period, status
+		  FROM bills
+		 WHERE bill_id = $1`,
+		id,
+	).Scan(&out.ClientID, &out.Currency, &out.Period, &out.Status)
+	if errors.Is(err, sqldb.ErrNoRows) {
+		return nil, apiError(errs.NotFound, "bill-not-found", "bill does not exist")
+	}
 	if err != nil {
-		rlog.Error("close bill: read sealed bill failed", "billID", id, "problemType", "close-unavailable", "err", err)
+		rlog.Error("seal bill: read existing bill failed", "billID", id, "problemType", "close-unavailable", "err", err)
 		return nil, apiError(errs.Unavailable, "close-unavailable", "close did not complete; retry after a short delay")
 	}
-	if sealed.Status != CLOSED.String() {
-		rlog.Error("close bill: workflow completed before ledger was sealed", "billID", id, "status", sealed.Status)
+	if out.Status != CLOSED.String() {
+		rlog.Error("seal bill: status was not closed", "billID", id, "status", out.Status, "problemType", "close-unavailable")
 		return nil, apiError(errs.Unavailable, "close-unavailable", "close did not complete; retry after a short delay")
 	}
-	return closedInvoice(ctx, id)
+	return &CloseBillResponse{Success: true}, nil
 }
 
 //encore:api public method=GET path=/v1/bills/:billId
@@ -341,20 +389,10 @@ func openTemporalError(err error) error {
 	return apiError(errs.Unavailable, "open-unavailable", "open workflow did not complete; retry after a short delay")
 }
 
-func closeTemporalError(ctx context.Context, id string, err error) (*InvoiceResource, error) {
+func (s *Service) closeTemporalError(ctx context.Context, id string, err error) (*CloseBillResponse, error) {
 	var notFoundErr *serviceerror.NotFound
 	if errors.As(err, &notFoundErr) {
-		invoice, readErr := readClosedInvoiceResource(ctx, id)
-		if readErr == nil {
-			return invoice, nil
-		}
-		if errors.Is(readErr, sqldb.ErrNoRows) {
-			if _, billErr := readBillResource(ctx, id); errors.Is(billErr, sqldb.ErrNoRows) {
-				return nil, apiError(errs.NotFound, "bill-not-found", "bill does not exist")
-			}
-		}
-		rlog.Error("close bill: not-found fallback did not find closed invoice", "billID", id, "problemType", "close-unavailable", "err", readErr)
-		return nil, apiError(errs.Unavailable, "close-unavailable", "close did not complete; retry after a short delay")
+		return s.SealBill(ctx, &SealBillRequest{BillID: id})
 	}
 
 	rlog.Error("close bill: temporal close failed", "billID", id, "problemType", "close-unavailable", "err", err)
@@ -367,19 +405,6 @@ func readBillError(id string, err error) error {
 	}
 	rlog.Error("get bill: read failed", "billID", id, "problemType", "read-unavailable", "err", err)
 	return apiError(errs.Unavailable, "read-unavailable", "bill could not be read; retry after a short delay")
-}
-
-func closedInvoice(ctx context.Context, id string) (*InvoiceResource, error) {
-	invoice, err := readClosedInvoiceResource(ctx, id)
-	if err == nil {
-		return invoice, nil
-	}
-	if errors.Is(err, sqldb.ErrNoRows) {
-		rlog.Error("close bill: read closed invoice failed", "billID", id, "problemType", "bill-not-found", "err", err)
-		return nil, apiError(errs.NotFound, "bill-not-found", "bill does not exist")
-	}
-	rlog.Error("close bill: read closed invoice failed", "billID", id, "problemType", "close-unavailable", "err", err)
-	return nil, apiError(errs.Unavailable, "close-unavailable", "close did not complete; retry after a short delay")
 }
 
 func getBillResponseFromBill(resource *BillResource) *GetBillResponse {

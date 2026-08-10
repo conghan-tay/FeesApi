@@ -39,6 +39,7 @@ func BillWorkflow(ctx workflow.Context, input BillInput) error {
 	closeCh := workflow.GetSignalChannel(ctx, SignalCloseBill)
 	timerCtx, cancelTimer := workflow.WithCancel(ctx)
 	autoCloseTimer := workflow.NewTimer(timerCtx, resolvePeriodEnd(input.Period).Sub(workflow.Now(ctx)))
+	triggeredByTimer := false
 
 	for state.status == OPEN {
 		if workflow.GetInfo(ctx).GetContinueAsNewSuggested() &&
@@ -58,6 +59,7 @@ func BillWorkflow(ctx workflow.Context, input BillInput) error {
 		})
 		selector.AddFuture(autoCloseTimer, func(workflow.Future) {
 			log.Info("auto-close timer fired", "clientID", state.clientID, "period", state.period)
+			triggeredByTimer = true
 			state.status = DRAINING
 		})
 		selector.AddReceive(lineItems.signals, func(c workflow.ReceiveChannel, _ bool) {
@@ -71,7 +73,30 @@ func BillWorkflow(ctx workflow.Context, input BillInput) error {
 		selector.Select(ctx)
 	}
 
-	return closeBill(ctx, state, lineItems)
+	if err := closeBill(ctx, state, lineItems); err != nil {
+		return err
+	}
+
+	if triggeredByTimer {
+		activityCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
+			StartToCloseTimeout: time.Minute,
+			RetryPolicy: &temporal.RetryPolicy{
+				InitialInterval:    time.Second,
+				BackoffCoefficient: 2.0,
+				MaximumInterval:    2 * time.Minute,
+			},
+		})
+		id := billID(state.clientID, state.currency, state.period)
+		if err := workflow.ExecuteActivity(activityCtx, ActivityAutoCloseBill, id).
+			Get(activityCtx, nil); err != nil {
+			log.Error("auto-close bill failed", "clientID", state.clientID, "period", state.period, "err", err)
+			return err
+		}
+	}
+
+	state.status = CLOSED
+	log.Info("bill closed", "clientID", state.clientID, "period", state.period)
+	return nil
 }
 
 func (h *lineItemSignalHandler) start(ctx workflow.Context, state *BillState, li chargecontract.LineItem) {
@@ -203,24 +228,5 @@ func closeBill(ctx workflow.Context, state *BillState, lineItems *lineItemSignal
 	}
 
 	state.status = CLOSING
-
-	activityCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
-		StartToCloseTimeout: time.Minute,
-		RetryPolicy: &temporal.RetryPolicy{
-			InitialInterval:    time.Second,
-			BackoffCoefficient: 2.0,
-			MaximumInterval:    2 * time.Minute,
-		},
-	})
-
-	id := billID(state.clientID, state.currency, state.period)
-	if err := workflow.ExecuteActivity(activityCtx, ActivityPersistInvoice, id).
-		Get(activityCtx, nil); err != nil {
-		log.Error("PersistInvoice failed", "clientID", state.clientID, "period", state.period, "err", err)
-		return err
-	}
-
-	state.status = CLOSED
-	log.Info("bill closed", "clientID", state.clientID, "period", state.period)
 	return nil
 }

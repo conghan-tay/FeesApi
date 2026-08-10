@@ -54,6 +54,10 @@ type CloseBillRequest struct {
 	Reason string `json:"reason"`
 }
 
+type CloseBillResponse struct {
+	Success bool `json:"success"`
+}
+
 type BillResource struct {
 	BillID           string             `json:"billId"`
 	ClientID         string             `json:"clientId"`
@@ -121,8 +125,8 @@ func (c *Client) AddLineItem(ctx context.Context, billID string, req LineItemReq
 	return do[LineItemResult](ctx, c, http.MethodPost, "/v1/bills/"+url.PathEscape(billID)+"/line-items", req)
 }
 
-func (c *Client) CloseBill(ctx context.Context, billID string, req CloseBillRequest) (*Response[BillResource], error) {
-	return do[BillResource](ctx, c, http.MethodPost, "/v1/bills/"+url.PathEscape(billID)+"/close", req)
+func (c *Client) CloseBill(ctx context.Context, billID string, req CloseBillRequest) (*Response[CloseBillResponse], error) {
+	return do[CloseBillResponse](ctx, c, http.MethodPost, "/v1/bills/"+url.PathEscape(billID)+"/close", req)
 }
 
 func (c *Client) GetBill(ctx context.Context, billID string, includeLineItems bool) (*Response[BillResource], error) {

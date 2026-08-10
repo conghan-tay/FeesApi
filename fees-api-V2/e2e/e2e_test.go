@@ -2,12 +2,10 @@ package e2e
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
 	"os"
-	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -148,28 +146,12 @@ func TestFeesLifecycleE2E(t *testing.T) {
 		}
 	})
 
-	var closedBody BillResource
-	t.Run("close bill returns invoice body", func(t *testing.T) {
+	t.Run("close bill returns success", func(t *testing.T) {
 		resp, err := client.CloseBill(ctx, billID, CloseBillRequest{Reason: "e2e-explicit-close"})
 		requireNoClientError(t, err)
 		requireStatus(t, resp, http.StatusOK)
-		if resp.Body == nil {
-			t.Fatal("expected closed bill body")
-		}
-		closedBody = *resp.Body
-		if closedBody.Status != "CLOSED" {
-			t.Fatalf("status = %q, want CLOSED", closedBody.Status)
-		}
-		if closedBody.TotalMinorAmount != expectedTotal {
-			t.Fatalf("totalMinorAmount = %q, want %s", closedBody.TotalMinorAmount, expectedTotal)
-		}
-		if len(closedBody.LineItems) != len(items) {
-			t.Fatalf("lineItems length = %d, want %d", len(closedBody.LineItems), len(items))
-		}
-		for _, item := range closedBody.LineItems {
-			if item.Status != "FINALIZED" {
-				t.Fatalf("closed line item %s status = %q, want FINALIZED", item.Reference, item.Status)
-			}
+		if resp.Body == nil || !resp.Body.Success {
+			t.Fatalf("close response = %#v, want success=true", resp.Body)
 		}
 	})
 
@@ -185,22 +167,18 @@ func TestFeesLifecycleE2E(t *testing.T) {
 		resp, err := client.CloseBill(ctx, billID, CloseBillRequest{Reason: "e2e-reclose"})
 		requireNoClientError(t, err)
 		requireStatus(t, resp, http.StatusOK)
-		if resp.Body == nil {
-			t.Fatal("expected closed bill body")
-		}
-		if !sameInvoiceFacts(*resp.Body, closedBody) {
-			got, _ := json.MarshalIndent(resp.Body, "", "  ")
-			want, _ := json.MarshalIndent(closedBody, "", "  ")
-			t.Fatalf("re-close invoice facts changed\ngot:  %s\nwant: %s", got, want)
+		if resp.Body == nil || !resp.Body.Success {
+			t.Fatalf("re-close response = %#v, want success=true", resp.Body)
 		}
 	})
 
 	t.Run("get with line items and list find the bill", func(t *testing.T) {
-		getResp, err := client.GetBill(ctx, billID, true)
-		requireNoClientError(t, err)
-		requireStatus(t, getResp, http.StatusOK)
+		getResp := waitForBillFacts(t, ctx, client, billID, expectedTotal, len(items))
 		if getResp.Body == nil {
 			t.Fatal("expected bill body")
+		}
+		if getResp.Body.Status != "CLOSED" {
+			t.Fatalf("GET status = %q, want CLOSED", getResp.Body.Status)
 		}
 		if len(getResp.Body.LineItems) != len(items) {
 			t.Fatalf("GET lineItems length = %d, want %d", len(getResp.Body.LineItems), len(items))
@@ -355,43 +333,6 @@ func requireLocationForBill(t *testing.T, got, wantBillID string) {
 	if u.Path != want {
 		t.Fatalf("Location path = %q, want %q (raw header = %q)", u.Path, want, got)
 	}
-}
-
-func sameInvoiceFacts(got, want BillResource) bool {
-	return got.BillID == want.BillID &&
-		got.Status == want.Status &&
-		got.Currency == want.Currency &&
-		got.TotalMinorAmount == want.TotalMinorAmount &&
-		got.ItemCount == want.ItemCount &&
-		equalStringPtr(got.ClosedAt, want.ClosedAt) &&
-		sameLineItemsByReference(got.LineItems, want.LineItems)
-}
-
-func equalStringPtr(got, want *string) bool {
-	if got == nil || want == nil {
-		return got == want
-	}
-	return *got == *want
-}
-
-func sameLineItemsByReference(got, want []LineItemResource) bool {
-	if len(got) != len(want) {
-		return false
-	}
-	gotSorted := append([]LineItemResource(nil), got...)
-	wantSorted := append([]LineItemResource(nil), want...)
-	sort.Slice(gotSorted, func(i, j int) bool {
-		return gotSorted[i].Reference < gotSorted[j].Reference
-	})
-	sort.Slice(wantSorted, func(i, j int) bool {
-		return wantSorted[i].Reference < wantSorted[j].Reference
-	})
-	for i := range gotSorted {
-		if gotSorted[i] != wantSorted[i] {
-			return false
-		}
-	}
-	return true
 }
 
 func containsBillWithTotal(bills []BillResource, billID, totalMinorAmount string) bool {

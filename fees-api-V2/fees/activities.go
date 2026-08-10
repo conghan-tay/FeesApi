@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"encore.app/charge"
-	"encore.dev/storage/sqldb"
+	"encore.dev/beta/errs"
 	"go.temporal.io/sdk/temporal"
 )
 
@@ -17,7 +17,7 @@ const (
 	ActivityPublishPending   = "ActivityPublishPending"
 	ActivityPublishFinalized = "ActivityPublishFinalized"
 	ActivityLongRunning      = "ActivityLongRunning"
-	ActivityPersistInvoice   = "ActivityPersistInvoice"
+	ActivityAutoCloseBill    = "ActivityAutoCloseBill"
 )
 
 const maxLongRunningDelay = 2 * time.Second
@@ -34,22 +34,28 @@ func (encoreLineItemStatusPublisher) PublishLineItemStatus(ctx context.Context, 
 
 type longRunningOperation func(context.Context, LedgerRow) error
 
+type billSealClient interface {
+	SealBill(context.Context, *SealBillRequest) (*CloseBillResponse, error)
+}
+
+type encoreBillSealClient struct{}
+
+func (encoreBillSealClient) SealBill(ctx context.Context, req *SealBillRequest) (*CloseBillResponse, error) {
+	return SealBill(ctx, req)
+}
+
 type Activities struct {
-	db                   *sqldb.Database
 	lineItemStatusClient lineItemStatusPublisher
 	longRunningOperation longRunningOperation
+	billSealClient       billSealClient
 }
 
-func NewActivities(db *sqldb.Database) *Activities {
+func NewActivities() *Activities {
 	return &Activities{
-		db:                   db,
 		lineItemStatusClient: encoreLineItemStatusPublisher{},
 		longRunningOperation: simulateLongRunningTransaction,
+		billSealClient:       encoreBillSealClient{},
 	}
-}
-
-func temporalNonRetryable(err error) error {
-	return temporal.NewNonRetryableApplicationError(err.Error(), "BillNotOpen", err)
 }
 
 func (a *Activities) ActivityPublishPending(ctx context.Context, row LedgerRow) error {
@@ -124,36 +130,24 @@ func waitForLongRunningTransaction(ctx context.Context, delay time.Duration) err
 	}
 }
 
-func (a *Activities) ActivityPersistInvoice(ctx context.Context, billID string) (BillView, error) {
-	var out BillView
-	err := a.db.QueryRow(ctx, `
-		UPDATE bills
-		   SET status = 'CLOSED',
-		       closed_at = now()
-		 WHERE bill_id = $1
-		   AND status = 'OPEN'
-		RETURNING client_id, currency, period, status`,
-		billID,
-	).Scan(&out.ClientID, &out.Currency, &out.Period, &out.Status)
-	if err == nil {
-		return out, nil
-	}
-	if !errors.Is(err, sqldb.ErrNoRows) {
-		return BillView{}, fmt.Errorf("seal bill %s: %w", billID, err)
+func (a *Activities) ActivityAutoCloseBill(ctx context.Context, billID string) error {
+	if a == nil || a.billSealClient == nil {
+		return errors.New("auto-close bill: seal client is not configured")
 	}
 
-	err = a.db.QueryRow(ctx, `
-		SELECT client_id, currency, period, status
-		  FROM bills
-		 WHERE bill_id = $1`,
-		billID,
-	).Scan(&out.ClientID, &out.Currency, &out.Period, &out.Status)
-	if err == nil {
-		return out, nil
+	resp, err := a.billSealClient.SealBill(ctx, &SealBillRequest{BillID: billID})
+	if err != nil {
+		wrapped := fmt.Errorf("auto-close bill %s: %w", billID, err)
+		if errs.Code(err) == errs.NotFound {
+			return temporal.NewNonRetryableApplicationError(wrapped.Error(), "BillNotFound", wrapped)
+		}
+		return wrapped
 	}
-	if errors.Is(err, sqldb.ErrNoRows) {
-		return BillView{}, temporalNonRetryable(fmt.Errorf("bill %s does not exist", billID))
+	if resp == nil {
+		return fmt.Errorf("auto-close bill %s: seal endpoint returned no response", billID)
 	}
-
-	return BillView{}, fmt.Errorf("read sealed bill %s: %w", billID, err)
+	if !resp.Success {
+		return fmt.Errorf("auto-close bill %s: seal endpoint did not confirm success", billID)
+	}
+	return nil
 }
