@@ -146,179 +146,63 @@ func TestActivityPublishFinalizedRejectsMissingPublisher(t *testing.T) {
 	}
 }
 
-func TestActivityPersistLineItemFreshInsertAndDuplicate(t *testing.T) {
-	ctx := context.Background()
-	activities := NewActivities(db)
-	billID := "bill-activity-line-open-USD-2099-01"
-	cleanupActivityBill(t, ctx, billID)
-	seedActivityBill(t, ctx, billID, "activity-line-open", "USD", "2099-01", "OPEN", nil)
+func TestActivityLongRunningInvokesConfiguredOperation(t *testing.T) {
+	row := LedgerRow{BillID: "bill-long-running", Reference: "ref-long-running"}
+	var got LedgerRow
+	activities := &Activities{longRunningOperation: func(_ context.Context, input LedgerRow) error {
+		got = input
+		return nil
+	}}
 
-	row := LedgerRow{
-		BillID:      billID,
-		Reference:   "ref-fresh",
-		AmountMinor: 1500,
-		Currency:    "USD",
-		FeeType:     "wire_transfer",
-		Description: "Outbound USD wire",
+	if err := activities.ActivityLongRunning(context.Background(), row); err != nil {
+		t.Fatalf("ActivityLongRunning returned error: %v", err)
 	}
-
-	applied, err := activities.ActivityPersistLineItem(ctx, row)
-	if err != nil {
-		t.Fatalf("ActivityPersistLineItem fresh insert returned error: %v", err)
+	if got != row {
+		t.Fatalf("long-running operation input = %#v, want %#v", got, row)
 	}
-	if !applied {
-		t.Fatal("ActivityPersistLineItem fresh insert applied=false, want true")
-	}
-	assertActivityLineItemCount(t, ctx, billID, row.Reference, 1)
-	assertActivityLineItemStatus(t, ctx, billID, row.Reference, "FINALIZED")
-
-	applied, err = activities.ActivityPersistLineItem(ctx, row)
-	if err != nil {
-		t.Fatalf("ActivityPersistLineItem duplicate returned error: %v", err)
-	}
-	if applied {
-		t.Fatal("ActivityPersistLineItem duplicate applied=true, want false")
-	}
-	assertActivityLineItemCount(t, ctx, billID, row.Reference, 1)
 }
 
-func TestActivityPersistLineItemRejectsClosedBill(t *testing.T) {
-	ctx := context.Background()
-	activities := NewActivities(db)
-	billID := "bill-activity-line-closed-USD-2099-01"
-	closedAt := time.Date(2099, 2, 1, 0, 0, 0, 0, time.UTC)
-	cleanupActivityBill(t, ctx, billID)
-	seedActivityBill(t, ctx, billID, "activity-line-closed", "USD", "2099-01", "CLOSED", &closedAt)
+func TestActivityLongRunningPropagatesOperationFailure(t *testing.T) {
+	operationErr := errors.New("external network rejected transaction")
+	activities := &Activities{longRunningOperation: func(context.Context, LedgerRow) error {
+		return operationErr
+	}}
 
-	row := LedgerRow{
-		BillID:      billID,
-		Reference:   "ref-closed",
-		AmountMinor: 1500,
-		Currency:    "USD",
-		FeeType:     "wire_transfer",
-		Description: "Outbound USD wire",
+	err := activities.ActivityLongRunning(context.Background(), LedgerRow{})
+	if !errors.Is(err, operationErr) {
+		t.Fatalf("ActivityLongRunning error = %v, want wrapped %v", err, operationErr)
 	}
-
-	applied, err := activities.ActivityPersistLineItem(ctx, row)
-	if err == nil {
-		t.Fatal("ActivityPersistLineItem on closed bill returned nil error")
-	}
-	if applied {
-		t.Fatal("ActivityPersistLineItem on closed bill applied=true, want false")
-	}
-	assertBillNotOpenError(t, err)
-	assertActivityLineItemCount(t, ctx, billID, row.Reference, 0)
 }
 
-func TestActivityPersistLineItemDuplicateOnClosedBillIsIdempotent(t *testing.T) {
-	ctx := context.Background()
-	activities := NewActivities(db)
-	billID := "bill-activity-line-closedup-USD-2099-01"
-	cleanupActivityBill(t, ctx, billID)
-	seedActivityBill(t, ctx, billID, "activity-line-closedup", "USD", "2099-01", "OPEN", nil)
-
-	row := LedgerRow{
-		BillID:      billID,
-		Reference:   "ref-race",
-		AmountMinor: 1500,
-		Currency:    "USD",
-		FeeType:     "wire_transfer",
-		Description: "Outbound USD wire",
+func TestActivityLongRunningRejectsMissingOperation(t *testing.T) {
+	if err := (&Activities{}).ActivityLongRunning(context.Background(), LedgerRow{}); err == nil {
+		t.Fatal("ActivityLongRunning returned nil error with no operation")
 	}
-
-	applied, err := activities.ActivityPersistLineItem(ctx, row)
-	if err != nil {
-		t.Fatalf("ActivityPersistLineItem initial insert returned error: %v", err)
-	}
-	if !applied {
-		t.Fatal("ActivityPersistLineItem initial insert applied=false, want true")
-	}
-
-	closedAt := time.Date(2099, 2, 1, 0, 0, 0, 0, time.UTC)
-	if _, err := db.Exec(ctx, `
-		UPDATE bills
-		   SET status = 'CLOSED',
-		       closed_at = $2
-		 WHERE bill_id = $1`,
-		billID,
-		closedAt,
-	); err != nil {
-		t.Fatalf("close bill after initial insert: %v", err)
-	}
-
-	applied, err = activities.ActivityPersistLineItem(ctx, row)
-	if err != nil {
-		t.Fatalf("ActivityPersistLineItem duplicate after close returned error: %v", err)
-	}
-	if applied {
-		t.Fatal("ActivityPersistLineItem duplicate after close applied=true, want false")
-	}
-	assertActivityLineItemCount(t, ctx, billID, row.Reference, 1)
 }
 
-func TestActivityPersistLineItemRejectsMissingBill(t *testing.T) {
-	ctx := context.Background()
-	activities := NewActivities(db)
-	billID := "bill-activity-line-missing-USD-2099-01"
-	cleanupActivityBill(t, ctx, billID)
+func TestWaitForLongRunningTransactionHonorsCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
 
-	row := LedgerRow{
-		BillID:      billID,
-		Reference:   "ref-missing",
-		AmountMinor: 1500,
-		Currency:    "USD",
-		FeeType:     "wire_transfer",
-		Description: "Outbound USD wire",
+	err := waitForLongRunningTransaction(ctx, time.Hour)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("wait error = %v, want context.Canceled", err)
 	}
-
-	applied, err := activities.ActivityPersistLineItem(ctx, row)
-	if err == nil {
-		t.Fatal("ActivityPersistLineItem on missing bill returned nil error")
-	}
-	if applied {
-		t.Fatal("ActivityPersistLineItem on missing bill applied=true, want false")
-	}
-	assertBillNotOpenError(t, err)
-	assertActivityLineItemCount(t, ctx, billID, row.Reference, 0)
 }
 
-func TestActivityPersistLineItemAcceptsNegativeAmount(t *testing.T) {
-	ctx := context.Background()
-	activities := NewActivities(db)
-	billID := "bill-activity-line-credit-USD-2099-01"
-	cleanupActivityBill(t, ctx, billID)
-	seedActivityBill(t, ctx, billID, "activity-line-credit", "USD", "2099-01", "OPEN", nil)
-
-	row := LedgerRow{
-		BillID:      billID,
-		Reference:   "ref-credit",
-		AmountMinor: -500,
-		Currency:    "USD",
-		FeeType:     "credit_adjustment",
-		Description: "Credit adjustment",
+func TestRandomLongRunningDelayStaysWithinContinuousRange(t *testing.T) {
+	sawSubsecondPrecision := false
+	for i := 0; i < 1_000; i++ {
+		delay := randomLongRunningDelay()
+		if delay < 0 || delay > maxLongRunningDelay {
+			t.Fatalf("random delay = %s, want within [0s, %s]", delay, maxLongRunningDelay)
+		}
+		if delay%time.Second != 0 {
+			sawSubsecondPrecision = true
+		}
 	}
-
-	applied, err := activities.ActivityPersistLineItem(ctx, row)
-	if err != nil {
-		t.Fatalf("ActivityPersistLineItem negative amount returned error: %v", err)
-	}
-	if !applied {
-		t.Fatal("ActivityPersistLineItem negative amount applied=false, want true")
-	}
-
-	var amountMinor int64
-	if err := db.QueryRow(ctx, `
-		SELECT amount_minor
-		  FROM line_items
-		 WHERE bill_id = $1
-		   AND reference = $2`,
-		billID,
-		row.Reference,
-	).Scan(&amountMinor); err != nil {
-		t.Fatalf("query inserted credit line item: %v", err)
-	}
-	if amountMinor != -500 {
-		t.Fatalf("amount_minor = %d, want -500", amountMinor)
+	if !sawSubsecondPrecision {
+		t.Fatal("random delays used only whole seconds, want a continuous nanosecond range")
 	}
 }
 

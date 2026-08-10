@@ -212,6 +212,9 @@ func TestInitServiceSuccessRegistersAndStartsWorker(t *testing.T) {
 	if registeredActivities.lineItemStatusClient == nil {
 		t.Fatal("registered activities has no line-item status client")
 	}
+	if registeredActivities.longRunningOperation == nil {
+		t.Fatal("registered activities has no long-running operation")
+	}
 	if svc.temporalConfig != defaultTemporalConfig() {
 		t.Fatalf("service config = %#v, want %#v", svc.temporalConfig, defaultTemporalConfig())
 	}

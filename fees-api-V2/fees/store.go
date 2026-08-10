@@ -111,8 +111,8 @@ func readBillResourceFrom(ctx context.Context, q ledgerQuerier, id string) (*Bil
 		       b.currency,
 		       b.period,
 		       b.status,
-		       COALESCE(SUM(li.amount_minor), 0),
-		       COUNT(li.id),
+		       COALESCE(SUM(li.amount_minor) FILTER (WHERE li.status = 'FINALIZED'), 0),
+		       COUNT(li.id) FILTER (WHERE li.status = 'FINALIZED'),
 		       b.opened_at,
 		       b.closed_at
 		  FROM bills b
@@ -264,15 +264,20 @@ func readBillLineItemsFrom(ctx context.Context, q ledgerQuerier, id string) ([]L
 
 func applyLineItemAggregates(resource *BillResource, items []LineItemResource) error {
 	var totalMinor int64
+	var finalizedCount int
 	for _, item := range items {
+		if item.Status != "FINALIZED" {
+			continue
+		}
 		amountMinor, err := strconv.ParseInt(item.MinorAmount, 10, 64)
 		if err != nil {
 			return fmt.Errorf("parse line item amount %q: %w", item.MinorAmount, err)
 		}
 		totalMinor += amountMinor
+		finalizedCount++
 	}
 	resource.TotalMinorAmount = strconv.FormatInt(totalMinor, 10)
-	resource.ItemCount = len(items)
+	resource.ItemCount = finalizedCount
 	return nil
 }
 
@@ -333,8 +338,8 @@ func listBillResources(ctx context.Context, opts listBillsOptions) (*ListBillsRe
 		       page.currency,
 		       page.period,
 		       page.status,
-		       COALESCE(SUM(li.amount_minor), 0),
-		       COUNT(li.id),
+		       COALESCE(SUM(li.amount_minor) FILTER (WHERE li.status = 'FINALIZED'), 0),
+		       COUNT(li.id) FILTER (WHERE li.status = 'FINALIZED'),
 		       page.opened_at,
 		       page.closed_at
 		  FROM page

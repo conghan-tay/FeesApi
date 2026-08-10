@@ -91,14 +91,46 @@ func (s *Service) AddLineItem(ctx context.Context, billId string, req *AddLineIt
 }
 
 //encore:api public method=POST path=/v1/line-item-status
-func (s *Service) PublishLineItemStatus(_ context.Context, req *PublishLineItemStatusRequest) error {
+func (s *Service) PublishLineItemStatus(ctx context.Context, req *PublishLineItemStatusRequest) error {
 	if req == nil {
 		return apiError(errs.InvalidArgument, "invalid-request", "request body is required")
 	}
 	if validationErr := validatePublishLineItemStatusRequest(*req); validationErr != "" {
 		return apiError(errs.InvalidArgument, "invalid-request", validationErr)
 	}
-	rlog.Info("PublishLineItemStatus Success BillId", req.BillID, " reference", req.Reference)
+	if s == nil || s.lineItemEvents == nil {
+		return lineItemStatusUnavailable()
+	}
+
+	messageID, err := s.lineItemEvents.Publish(ctx, &LineItemEvent{
+		BillID:      req.BillID,
+		Reference:   req.Reference,
+		MinorAmount: req.MinorAmount,
+		Currency:    req.Currency,
+		FeeType:     req.FeeType,
+		Description: req.Description,
+		Status:      req.Status,
+		OrderingID:  req.BillID + "-" + req.Reference,
+	})
+	if err != nil {
+		rlog.Error(
+			"publish line item status: pubsub publish failed",
+			"billID", req.BillID,
+			"reference", req.Reference,
+			"status", req.Status,
+			"problemType", "line-item-status-unavailable",
+			"err", err,
+		)
+		return lineItemStatusUnavailable()
+	}
+
+	rlog.Info(
+		"publish line item status: event published",
+		"billID", req.BillID,
+		"reference", req.Reference,
+		"status", req.Status,
+		"messageID", messageID,
+	)
 	return nil
 }
 
@@ -162,6 +194,14 @@ func addLineItemUnavailable() error {
 		errs.Unavailable,
 		"add-line-item-unavailable",
 		"add-line-item signal was not accepted; retry after a short delay",
+	)
+}
+
+func lineItemStatusUnavailable() error {
+	return apiError(
+		errs.Unavailable,
+		"line-item-status-unavailable",
+		"line item status was not published; retry after a short delay",
 	)
 }
 

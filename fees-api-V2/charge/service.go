@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"encore.dev/pubsub"
 	"go.temporal.io/sdk/client"
 )
 
@@ -20,6 +21,10 @@ type temporalConfig struct {
 type temporalClient interface {
 	Close()
 	SignalWorkflow(ctx context.Context, workflowID string, runID string, signalName string, arg interface{}) error
+}
+
+type lineItemEventPublisher interface {
+	Publish(context.Context, *LineItemEvent) (string, error)
 }
 
 type temporalDialer func(context.Context, client.Options) (temporalClient, error)
@@ -39,6 +44,7 @@ func defaultTemporalConfig() temporalConfig {
 type Service struct {
 	temporalClient temporalClient
 	temporalConfig temporalConfig
+	lineItemEvents lineItemEventPublisher
 }
 
 func initService() (*Service, error) {
@@ -54,6 +60,7 @@ func initService() (*Service, error) {
 	return &Service{
 		temporalClient: temporalClient,
 		temporalConfig: cfg,
+		lineItemEvents: pubsub.TopicRef[pubsub.Publisher[*LineItemEvent]](UpdateLineItems),
 	}, nil
 }
 
