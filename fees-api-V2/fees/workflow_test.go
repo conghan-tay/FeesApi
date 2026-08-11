@@ -21,10 +21,6 @@ func TestBillWorkflowQueryStartsOpen(t *testing.T) {
 	env := newBillWorkflowTestEnv()
 	in := testBillInput()
 
-	env.OnActivity(ActivityPersistInvoice, mock.Anything, billID(in.ClientID, in.Currency, in.Period)).
-		Return(testClosedBillView(in), nil).
-		Once()
-
 	queried := false
 	env.RegisterDelayedCallback(func() {
 		defer env.SignalWorkflow(SignalCloseBill, CloseSignal{Reason: "test-close"})
@@ -71,10 +67,6 @@ func TestBillWorkflowHandlesAddLineItemWithoutStartupActivity(t *testing.T) {
 	env.OnActivity(ActivityLongRunning, mock.Anything, row).
 		Return(nil).
 		Once()
-	env.OnActivity(ActivityPersistInvoice, mock.Anything, row.BillID).
-		Return(testClosedBillView(in), nil).
-		Once()
-
 	env.RegisterDelayedCallback(func() {
 		env.SignalWorkflow(chargecontract.SignalAddLineItem, item)
 	}, 0)
@@ -100,13 +92,9 @@ func TestBillWorkflowAddLineItemSignalRunsLongTransaction(t *testing.T) {
 		Return(nil).
 		NotBefore(publishCall).
 		Once()
-	finalizedCall := env.OnActivity(ActivityPublishFinalized, mock.Anything, row).
+	env.OnActivity(ActivityPublishFinalized, mock.Anything, row).
 		Return(nil).
 		NotBefore(longRunningCall).
-		Once()
-	env.OnActivity(ActivityPersistInvoice, mock.Anything, row.BillID).
-		Return(testClosedBillView(in), nil).
-		NotBefore(finalizedCall).
 		Once()
 
 	env.RegisterDelayedCallback(func() {
@@ -136,10 +124,6 @@ func TestBillWorkflowPublishesStatusesForEveryDuplicateSignal(t *testing.T) {
 	env.OnActivity(ActivityPublishFinalized, mock.Anything, row).
 		Return(nil).
 		Twice()
-	env.OnActivity(ActivityPersistInvoice, mock.Anything, row.BillID).
-		Return(testClosedBillView(in), nil).
-		Once()
-
 	env.RegisterDelayedCallback(func() {
 		env.SignalWorkflow(chargecontract.SignalAddLineItem, item)
 		env.SignalWorkflow(chargecontract.SignalAddLineItem, item)
@@ -162,10 +146,6 @@ func TestBillWorkflowPublishPendingRetriesFiveTimesThenSkipsPersistence(t *testi
 	env.OnActivity(ActivityPublishPending, mock.Anything, row).
 		Return(errors.New("charge callback unavailable")).
 		Times(5)
-	env.OnActivity(ActivityPersistInvoice, mock.Anything, row.BillID).
-		Return(testClosedBillView(in), nil).
-		Once()
-
 	env.RegisterDelayedCallback(func() {
 		env.SignalWorkflow(chargecontract.SignalAddLineItem, item)
 	}, time.Millisecond)
@@ -194,14 +174,10 @@ func TestBillWorkflowPublishFinalizedRetriesFiveTimesThenAllowsClose(t *testing.
 		Return(nil).
 		NotBefore(publishCall).
 		Once()
-	finalizedCall := env.OnActivity(ActivityPublishFinalized, mock.Anything, row).
+	env.OnActivity(ActivityPublishFinalized, mock.Anything, row).
 		Return(errors.New("charge callback unavailable")).
 		NotBefore(longRunningCall).
 		Times(5)
-	env.OnActivity(ActivityPersistInvoice, mock.Anything, row.BillID).
-		Return(testClosedBillView(in), nil).
-		NotBefore(finalizedCall).
-		Once()
 
 	env.RegisterDelayedCallback(func() {
 		env.SignalWorkflow(chargecontract.SignalAddLineItem, item)
@@ -226,10 +202,6 @@ func TestBillWorkflowAddLineItemSignalHandlesDuplicate(t *testing.T) {
 	env.OnActivity(ActivityLongRunning, mock.Anything, row).
 		Return(nil).
 		Once()
-	env.OnActivity(ActivityPersistInvoice, mock.Anything, row.BillID).
-		Return(testClosedBillView(in), nil).
-		Once()
-
 	env.RegisterDelayedCallback(func() {
 		env.SignalWorkflow(chargecontract.SignalAddLineItem, item)
 	}, time.Millisecond)
@@ -243,7 +215,7 @@ func TestBillWorkflowAddLineItemSignalHandlesDuplicate(t *testing.T) {
 	env.AssertNumberOfCalls(t, ActivityPublishFinalized, 1)
 }
 
-func TestBillWorkflowProcessesSignalsConcurrentlyAndDrainsThroughFinalizedBeforeSeal(t *testing.T) {
+func TestBillWorkflowProcessesSignalsConcurrentlyAndDrainsThroughFinalizedBeforeCompletion(t *testing.T) {
 	env := newBillWorkflowTestEnvWithoutDefaultPublisher()
 	in := testBillInput()
 	first := testLineItem("ref-concurrent-1", "USD")
@@ -255,8 +227,6 @@ func TestBillWorkflowProcessesSignalsConcurrentlyAndDrainsThroughFinalizedBefore
 	var longRunningCompleted atomic.Int32
 	var finalizedStarted atomic.Int32
 	var finalizedCompleted atomic.Int32
-	var invoiceStarted atomic.Bool
-	var invoiceStartedEarly atomic.Bool
 	var longRunningDrainChecked atomic.Bool
 	var longRunningDrainValid atomic.Bool
 	var finalizedDrainChecked atomic.Bool
@@ -308,16 +278,6 @@ func TestBillWorkflowProcessesSignalsConcurrentlyAndDrainsThroughFinalizedBefore
 		Return(nil).
 		NotBefore(secondCall).
 		Once()
-	env.OnActivity(ActivityPersistInvoice, mock.Anything, firstRow.BillID).
-		Run(func(mock.Arguments) {
-			invoiceStarted.Store(true)
-			if longRunningCompleted.Load() != 2 || finalizedCompleted.Load() != 2 {
-				invoiceStartedEarly.Store(true)
-			}
-		}).
-		Return(testClosedBillView(in), nil).
-		Once()
-
 	env.RegisterDelayedCallback(func() {
 		env.SignalWorkflow(chargecontract.SignalAddLineItem, first)
 		env.SignalWorkflow(chargecontract.SignalAddLineItem, second)
@@ -331,7 +291,7 @@ func TestBillWorkflowProcessesSignalsConcurrentlyAndDrainsThroughFinalizedBefore
 			longRunningStarted.Load() == 2 &&
 				longRunningCompleted.Load() == 0 &&
 				finalizedStarted.Load() == 0 &&
-				!invoiceStarted.Load(),
+				!env.IsWorkflowCompleted(),
 		)
 	}, 30*time.Minute)
 	env.RegisterDelayedCallback(func() {
@@ -340,7 +300,7 @@ func TestBillWorkflowProcessesSignalsConcurrentlyAndDrainsThroughFinalizedBefore
 			longRunningCompleted.Load() == 2 &&
 				finalizedStarted.Load() == 2 &&
 				finalizedCompleted.Load() == 0 &&
-				!invoiceStarted.Load(),
+				!env.IsWorkflowCompleted(),
 		)
 	}, 90*time.Minute)
 
@@ -350,19 +310,13 @@ func TestBillWorkflowProcessesSignalsConcurrentlyAndDrainsThroughFinalizedBefore
 		t.Fatal("long-running-drain assertion did not run")
 	}
 	if !longRunningDrainValid.Load() {
-		t.Error("signals did not overlap in long-running work, or invoice sealing began before it completed")
+		t.Error("signals did not overlap in long-running work, or workflow completed before it drained")
 	}
 	if !finalizedDrainChecked.Load() {
 		t.Fatal("finalized-drain assertion did not run")
 	}
 	if !finalizedDrainValid.Load() {
-		t.Error("FINALIZED activities were not in flight together, or invoice sealing began before they completed")
-	}
-	if !invoiceStarted.Load() {
-		t.Fatal("ActivityPersistInvoice did not start after line-item pipelines completed")
-	}
-	if invoiceStartedEarly.Load() {
-		t.Error("ActivityPersistInvoice started before all line-item pipelines completed FINALIZED publication")
+		t.Error("FINALIZED activities were not in flight together, or workflow completed before they drained")
 	}
 	env.AssertExpectations(t)
 	env.AssertNumberOfCalls(t, ActivityPublishPending, 2)
@@ -379,10 +333,6 @@ func TestBillWorkflowLongRunningFailureDoesNotFailWorkflow(t *testing.T) {
 	env.OnActivity(ActivityLongRunning, mock.Anything, row).
 		Return(temporal.NewNonRetryableApplicationError("external transaction rejected", "TransactionRejected", nil)).
 		Once()
-	env.OnActivity(ActivityPersistInvoice, mock.Anything, row.BillID).
-		Return(testClosedBillView(in), nil).
-		Once()
-
 	env.RegisterDelayedCallback(func() {
 		env.SignalWorkflow(chargecontract.SignalAddLineItem, item)
 	}, time.Millisecond)
@@ -400,10 +350,6 @@ func TestBillWorkflowDropsCurrencyMismatchSignal(t *testing.T) {
 	env := newBillWorkflowTestEnv()
 	in := testBillInput()
 
-	env.OnActivity(ActivityPersistInvoice, mock.Anything, billID(in.ClientID, in.Currency, in.Period)).
-		Return(testClosedBillView(in), nil).
-		Once()
-
 	env.RegisterDelayedCallback(func() {
 		env.SignalWorkflow(chargecontract.SignalAddLineItem, testLineItem("ref-mismatch", "GEL"))
 	}, time.Millisecond)
@@ -418,21 +364,19 @@ func TestBillWorkflowDropsCurrencyMismatchSignal(t *testing.T) {
 	env.AssertNumberOfCalls(t, ActivityLongRunning, 0)
 }
 
-func TestBillWorkflowRejectsAddDuringClosing(t *testing.T) {
+func TestBillWorkflowAutoCloseRejectsAddDuringClosing(t *testing.T) {
 	env := newBillWorkflowTestEnv()
 	in := testBillInput()
+	env.SetStartTime(time.Date(2099, 1, 31, 23, 59, 0, 0, time.UTC))
 
-	env.OnActivity(ActivityPersistInvoice, mock.Anything, billID(in.ClientID, in.Currency, in.Period)).
+	env.OnActivity(ActivityAutoCloseBill, mock.Anything, billID(in.ClientID, in.Currency, in.Period)).
 		After(time.Hour).
-		Return(testClosedBillView(in), nil).
+		Return(nil).
 		Once()
 
 	env.RegisterDelayedCallback(func() {
-		env.SignalWorkflow(SignalCloseBill, CloseSignal{Reason: "test-close"})
-	}, time.Millisecond)
-	env.RegisterDelayedCallback(func() {
 		env.SignalWorkflow(chargecontract.SignalAddLineItem, testLineItem("ref-after-close", "USD"))
-	}, time.Minute)
+	}, 2*time.Minute)
 
 	env.ExecuteWorkflow(BillWorkflow, in)
 	assertBillWorkflowCompleted(t, env)
@@ -449,13 +393,9 @@ func TestBillWorkflowRejectsAddDuringDraining(t *testing.T) {
 	rejectedItem := testLineItem("ref-during-draining", "USD")
 	rejectedRow := testLedgerRow(in, rejectedItem)
 
-	lineItemCall := env.OnActivity(ActivityLongRunning, mock.Anything, inFlightRow).
+	env.OnActivity(ActivityLongRunning, mock.Anything, inFlightRow).
 		After(time.Hour).
 		Return(nil).
-		Once()
-	env.OnActivity(ActivityPersistInvoice, mock.Anything, billID(in.ClientID, in.Currency, in.Period)).
-		Return(testClosedBillView(in), nil).
-		NotBefore(lineItemCall).
 		Once()
 
 	env.RegisterDelayedCallback(func() {
@@ -476,13 +416,9 @@ func TestBillWorkflowRejectsAddDuringDraining(t *testing.T) {
 	env.AssertNotCalled(t, ActivityLongRunning, mock.Anything, rejectedRow)
 }
 
-func TestBillWorkflowExplicitCloseSealsBill(t *testing.T) {
+func TestBillWorkflowExplicitCloseCompletesWithoutAutoCloseActivity(t *testing.T) {
 	env := newBillWorkflowTestEnv()
 	in := testBillInput()
-
-	env.OnActivity(ActivityPersistInvoice, mock.Anything, billID(in.ClientID, in.Currency, in.Period)).
-		Return(testClosedBillView(in), nil).
-		Once()
 
 	env.RegisterDelayedCallback(func() {
 		env.SignalWorkflow(SignalCloseBill, CloseSignal{Reason: "explicit-close"})
@@ -491,6 +427,7 @@ func TestBillWorkflowExplicitCloseSealsBill(t *testing.T) {
 	env.ExecuteWorkflow(BillWorkflow, in)
 	assertBillWorkflowCompleted(t, env)
 	env.AssertExpectations(t)
+	env.AssertNumberOfCalls(t, ActivityAutoCloseBill, 0)
 }
 
 func TestBillWorkflowAutoCloseTimerSealsBill(t *testing.T) {
@@ -498,8 +435,8 @@ func TestBillWorkflowAutoCloseTimerSealsBill(t *testing.T) {
 	in := testBillInput()
 	env.SetStartTime(time.Date(2099, 1, 31, 23, 59, 0, 0, time.UTC))
 
-	env.OnActivity(ActivityPersistInvoice, mock.Anything, billID(in.ClientID, in.Currency, in.Period)).
-		Return(testClosedBillView(in), nil).
+	env.OnActivity(ActivityAutoCloseBill, mock.Anything, billID(in.ClientID, in.Currency, in.Period)).
+		Return(nil).
 		Once()
 
 	env.ExecuteWorkflow(BillWorkflow, in)
@@ -512,8 +449,8 @@ func TestBillWorkflowAutoCloseAtPeriodEndSealsImmediately(t *testing.T) {
 	in := testBillInput()
 	env.SetStartTime(resolvePeriodEnd(in.Period))
 
-	env.OnActivity(ActivityPersistInvoice, mock.Anything, billID(in.ClientID, in.Currency, in.Period)).
-		Return(testClosedBillView(in), nil).
+	env.OnActivity(ActivityAutoCloseBill, mock.Anything, billID(in.ClientID, in.Currency, in.Period)).
+		Return(nil).
 		Once()
 
 	env.ExecuteWorkflow(BillWorkflow, in)
@@ -526,9 +463,9 @@ func TestBillWorkflowAutoCloseRejectsStragglerDuringSeal(t *testing.T) {
 	in := testBillInput()
 	env.SetStartTime(time.Date(2099, 1, 31, 23, 59, 0, 0, time.UTC))
 
-	env.OnActivity(ActivityPersistInvoice, mock.Anything, billID(in.ClientID, in.Currency, in.Period)).
+	env.OnActivity(ActivityAutoCloseBill, mock.Anything, billID(in.ClientID, in.Currency, in.Period)).
 		After(time.Hour).
-		Return(testClosedBillView(in), nil).
+		Return(nil).
 		Once()
 
 	env.RegisterDelayedCallback(func() {
@@ -540,6 +477,48 @@ func TestBillWorkflowAutoCloseRejectsStragglerDuringSeal(t *testing.T) {
 	env.AssertExpectations(t)
 	env.AssertNumberOfCalls(t, ActivityPublishPending, 0)
 	env.AssertNumberOfCalls(t, ActivityLongRunning, 0)
+}
+
+func TestBillWorkflowAutoCloseRetriesAndStaysClosingUntilSealSucceeds(t *testing.T) {
+	env := newBillWorkflowTestEnv()
+	in := testBillInput()
+	id := billID(in.ClientID, in.Currency, in.Period)
+	env.SetStartTime(time.Date(2099, 1, 31, 23, 59, 0, 0, time.UTC))
+
+	env.OnActivity(ActivityAutoCloseBill, mock.Anything, id).
+		After(time.Hour).
+		Return(errors.New("seal endpoint unavailable")).
+		Twice()
+	env.OnActivity(ActivityAutoCloseBill, mock.Anything, id).
+		Return(nil).
+		Once()
+
+	checkedClosing := false
+	env.RegisterDelayedCallback(func() {
+		value, err := env.QueryWorkflow(QueryGetBill)
+		if err != nil {
+			t.Errorf("QueryWorkflow during auto-close retry returned error: %v", err)
+			return
+		}
+		var got BillView
+		if err := value.Get(&got); err != nil {
+			t.Errorf("decode BillView during auto-close retry: %v", err)
+			return
+		}
+		if got.Status != CLOSING.String() {
+			t.Errorf("status during auto-close retry = %q, want CLOSING", got.Status)
+			return
+		}
+		checkedClosing = true
+	}, 30*time.Minute)
+
+	env.ExecuteWorkflow(BillWorkflow, in)
+	assertBillWorkflowCompleted(t, env)
+	if !checkedClosing {
+		t.Fatal("CLOSING query assertion did not run")
+	}
+	env.AssertExpectations(t)
+	env.AssertNumberOfCalls(t, ActivityAutoCloseBill, 3)
 }
 
 func TestBillWorkflowContinueAsNewCarriesStatus(t *testing.T) {
@@ -622,7 +601,7 @@ func newBillWorkflowTestEnvWithoutDefaultPublisher() *testsuite.TestWorkflowEnvi
 	env.RegisterActivityWithOptions(mockPublishPendingActivity, activity.RegisterOptions{Name: ActivityPublishPending})
 	env.RegisterActivityWithOptions(mockPublishFinalizedActivity, activity.RegisterOptions{Name: ActivityPublishFinalized})
 	env.RegisterActivityWithOptions(mockLongRunningActivity, activity.RegisterOptions{Name: ActivityLongRunning})
-	env.RegisterActivityWithOptions(mockPersistInvoiceActivity, activity.RegisterOptions{Name: ActivityPersistInvoice})
+	env.RegisterActivityWithOptions(mockAutoCloseBillActivity, activity.RegisterOptions{Name: ActivityAutoCloseBill})
 	return env
 }
 
@@ -638,8 +617,8 @@ func mockLongRunningActivity(context.Context, LedgerRow) error {
 	panic("mockLongRunningActivity should be mocked in workflow tests")
 }
 
-func mockPersistInvoiceActivity(context.Context, string) (BillView, error) {
-	panic("mockPersistInvoiceActivity should be mocked in workflow tests")
+func mockAutoCloseBillActivity(context.Context, string) error {
+	panic("mockAutoCloseBillActivity should be mocked in workflow tests")
 }
 
 func testBillInput() BillInput {
@@ -668,15 +647,6 @@ func testLedgerRow(in BillInput, item chargecontract.LineItem) LedgerRow {
 		Currency:    item.Currency,
 		FeeType:     item.FeeType,
 		Description: item.Description,
-	}
-}
-
-func testClosedBillView(in BillInput) BillView {
-	return BillView{
-		ClientID: in.ClientID,
-		Currency: in.Currency,
-		Period:   in.Period,
-		Status:   "CLOSED",
 	}
 }
 

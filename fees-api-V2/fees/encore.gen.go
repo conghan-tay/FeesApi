@@ -13,9 +13,14 @@ func OpenBill(ctx context.Context, p *OpenBillRequest) (*OpenBillResponse, error
 	return (*OpenBillResponse)(nil), nil
 }
 
-func CloseBill(ctx context.Context, billId string, p *CloseBillRequest) (*InvoiceResource, error) {
+func CloseBill(ctx context.Context, billId string, p *CloseBillRequest) (*CloseBillResponse, error) {
 	// The implementation is elided here, and generated at compile-time by Encore.
-	return (*InvoiceResource)(nil), nil
+	return (*CloseBillResponse)(nil), nil
+}
+
+func SealBill(ctx context.Context, p *SealBillRequest) (*CloseBillResponse, error) {
+	// The implementation is elided here, and generated at compile-time by Encore.
+	return (*CloseBillResponse)(nil), nil
 }
 
 func GetBill(ctx context.Context, billId string, p *GetBillRequest) (*GetBillResponse, error) {
@@ -35,7 +40,9 @@ func ListBills(ctx context.Context, p *ListBillsRequest) (*ListBillsResponse, er
 type Interface interface {
 	OpenBill(ctx context.Context, p *OpenBillRequest) (*OpenBillResponse, error)
 
-	CloseBill(ctx context.Context, billId string, p *CloseBillRequest) (*InvoiceResource, error)
+	CloseBill(ctx context.Context, billId string, p *CloseBillRequest) (*CloseBillResponse, error)
+
+	SealBill(ctx context.Context, p *SealBillRequest) (*CloseBillResponse, error)
 
 	GetBill(ctx context.Context, billId string, p *GetBillRequest) (*GetBillResponse, error)
 

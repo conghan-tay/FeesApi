@@ -41,7 +41,7 @@ func TestRegisterWorkflows(t *testing.T) {
 
 func TestRegisterActivities(t *testing.T) {
 	registrar := &recordingRegistrar{}
-	activities := NewActivities(db)
+	activities := NewActivities()
 
 	registerActivities(registrar, activities)
 
@@ -64,7 +64,10 @@ func TestRegisterActivities(t *testing.T) {
 	if _, ok := activityType.MethodByName("ActivityPersistBill"); ok {
 		t.Fatal("ActivityPersistBill remains registered")
 	}
-	for _, name := range []string{"ActivityPublishPending", "ActivityPublishFinalized", "ActivityLongRunning", "ActivityPersistInvoice"} {
+	if _, ok := activityType.MethodByName("ActivityPersistInvoice"); ok {
+		t.Fatal("ActivityPersistInvoice remains registered")
+	}
+	for _, name := range []string{"ActivityPublishPending", "ActivityPublishFinalized", "ActivityLongRunning", "ActivityAutoCloseBill"} {
 		if _, ok := activityType.MethodByName(name); !ok {
 			t.Fatalf("%s is not available on registered Activities", name)
 		}

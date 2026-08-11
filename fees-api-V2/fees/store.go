@@ -204,17 +204,6 @@ func readBillWithLineItemsResource(ctx context.Context, id string) (*InvoiceReso
 	return invoiceResourceFromBill(resource, items), nil
 }
 
-func readClosedInvoiceResource(ctx context.Context, id string) (*InvoiceResource, error) {
-	resource, err := readBillWithLineItemsResource(ctx, id)
-	if err != nil {
-		return nil, err
-	}
-	if resource.Status != CLOSED.String() {
-		return nil, sqldb.ErrNoRows
-	}
-	return resource, nil
-}
-
 func readBillLineItems(ctx context.Context, id string) ([]LineItemResource, error) {
 	return readBillLineItemsFrom(ctx, db, id)
 }

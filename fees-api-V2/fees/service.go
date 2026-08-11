@@ -107,7 +107,7 @@ func productionTemporalRuntime(cfg temporalConfig) (*temporalRuntime, error) {
 		return nil, fmt.Errorf("create temporal worker on task queue %s: %w", cfg.TaskQueue, err)
 	}
 	registerWorkflows(temporalWorker)
-	registerActivities(temporalWorker, NewActivities(db))
+	registerActivities(temporalWorker, NewActivities())
 
 	return &temporalRuntime{
 		client: temporalClient,
