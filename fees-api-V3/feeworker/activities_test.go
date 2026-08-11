@@ -1,4 +1,4 @@
-package fees
+package feeworker
 
 import (
 	"context"
@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"encore.app/charge"
+	"encore.app/fees"
 	apierrs "encore.dev/beta/errs"
 	"go.temporal.io/sdk/temporal"
 )
@@ -18,12 +19,12 @@ type recordingLineItemStatusPublisher struct {
 }
 
 type recordingBillSealClient struct {
-	response *CloseBillResponse
+	response *fees.CloseBillResponse
 	err      error
-	requests []SealBillRequest
+	requests []fees.SealBillRequest
 }
 
-func (c *recordingBillSealClient) SealBill(_ context.Context, req *SealBillRequest) (*CloseBillResponse, error) {
+func (c *recordingBillSealClient) SealBill(_ context.Context, req *fees.SealBillRequest) (*fees.CloseBillResponse, error) {
 	if req != nil {
 		c.requests = append(c.requests, *req)
 	}
@@ -221,13 +222,13 @@ func TestRandomLongRunningDelayStaysWithinContinuousRange(t *testing.T) {
 
 func TestActivityAutoCloseBillCallsSealEndpoint(t *testing.T) {
 	billID := "bill-activity-auto-close-USD-2099-01"
-	client := &recordingBillSealClient{response: &CloseBillResponse{Success: true}}
+	client := &recordingBillSealClient{response: &fees.CloseBillResponse{Success: true}}
 	activities := &Activities{billSealClient: client}
 
 	if err := activities.ActivityAutoCloseBill(context.Background(), billID); err != nil {
 		t.Fatalf("ActivityAutoCloseBill returned error: %v", err)
 	}
-	if len(client.requests) != 1 || client.requests[0] != (SealBillRequest{BillID: billID}) {
+	if len(client.requests) != 1 || client.requests[0] != (fees.SealBillRequest{BillID: billID}) {
 		t.Fatalf("seal requests = %#v, want exact bill ID", client.requests)
 	}
 }
@@ -240,7 +241,7 @@ func TestActivityAutoCloseBillPropagatesRetryableFailures(t *testing.T) {
 		t.Fatalf("ActivityAutoCloseBill error = %v, want wrapped %v", err, sealErr)
 	}
 
-	for name, response := range map[string]*CloseBillResponse{
+	for name, response := range map[string]*fees.CloseBillResponse{
 		"nil response":   nil,
 		"false response": {Success: false},
 	} {
@@ -262,7 +263,7 @@ func TestActivityAutoCloseBillRejectsMissingClient(t *testing.T) {
 
 func TestActivityAutoCloseBillMakesMissingBillNonRetryable(t *testing.T) {
 	client := &recordingBillSealClient{
-		err: apiError(apierrs.NotFound, "bill-not-found", "bill does not exist"),
+		err: apierrs.B().Code(apierrs.NotFound).Msg("bill does not exist").Err(),
 	}
 	err := (&Activities{billSealClient: client}).ActivityAutoCloseBill(context.Background(), "bill-missing")
 
@@ -272,97 +273,5 @@ func TestActivityAutoCloseBillMakesMissingBillNonRetryable(t *testing.T) {
 	}
 	if appErr.Type() != "BillNotFound" || !appErr.NonRetryable() {
 		t.Fatalf("application error type/nonRetryable = %q/%v, want BillNotFound/true", appErr.Type(), appErr.NonRetryable())
-	}
-}
-
-func cleanupActivityBill(t *testing.T, ctx context.Context, billID string) {
-	t.Helper()
-
-	cleanup := func() {
-		_, _ = db.Exec(ctx, `DELETE FROM line_items WHERE bill_id = $1`, billID)
-		_, _ = db.Exec(ctx, `DELETE FROM bills WHERE bill_id = $1`, billID)
-	}
-	cleanup()
-	t.Cleanup(cleanup)
-}
-
-func seedActivityBill(t *testing.T, ctx context.Context, billID, clientID, currency, period, status string, closedAt *time.Time) {
-	t.Helper()
-
-	_, err := db.Exec(ctx, `
-		INSERT INTO bills (bill_id, client_id, currency, period, status, closed_at)
-		VALUES ($1, $2, $3, $4, $5, $6)`,
-		billID,
-		clientID,
-		currency,
-		period,
-		status,
-		closedAt,
-	)
-	if err != nil {
-		t.Fatalf("seed bill %s: %v", billID, err)
-	}
-}
-
-func assertActivityLineItemCount(t *testing.T, ctx context.Context, billID, reference string, want int) {
-	t.Helper()
-
-	var got int
-	if err := db.QueryRow(ctx, `
-		SELECT COUNT(*)
-		  FROM line_items
-		 WHERE bill_id = $1
-		   AND reference = $2`,
-		billID,
-		reference,
-	).Scan(&got); err != nil {
-		t.Fatalf("count line items for %s/%s: %v", billID, reference, err)
-	}
-	if got != want {
-		t.Fatalf("line item count for %s/%s = %d, want %d", billID, reference, got, want)
-	}
-}
-
-func assertActivityLineItemStatus(t *testing.T, ctx context.Context, billID, reference, want string) {
-	t.Helper()
-
-	var got string
-	if err := db.QueryRow(ctx, `
-		SELECT status
-		  FROM line_items
-		 WHERE bill_id = $1
-		   AND reference = $2`,
-		billID,
-		reference,
-	).Scan(&got); err != nil {
-		t.Fatalf("read line item status for %s/%s: %v", billID, reference, err)
-	}
-	if got != want {
-		t.Fatalf("line item status for %s/%s = %q, want %q", billID, reference, got, want)
-	}
-}
-
-func assertActivityBillRow(t *testing.T, ctx context.Context, billID, clientID, currency, period, status string, wantCount int) {
-	t.Helper()
-
-	var gotCount int
-	if err := db.QueryRow(ctx, `
-		SELECT COUNT(*)
-		  FROM bills
-		 WHERE bill_id = $1
-		   AND client_id = $2
-		   AND currency = $3
-		   AND period = $4
-		   AND status = $5`,
-		billID,
-		clientID,
-		currency,
-		period,
-		status,
-	).Scan(&gotCount); err != nil {
-		t.Fatalf("count bill row %s: %v", billID, err)
-	}
-	if gotCount != wantCount {
-		t.Fatalf("bill row count for %s = %d, want %d", billID, gotCount, wantCount)
 	}
 }

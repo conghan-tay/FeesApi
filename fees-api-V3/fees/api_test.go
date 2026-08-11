@@ -479,8 +479,15 @@ func TestOpenBillSuccessStartsWorkflowAndReturnsCreatedResource(t *testing.T) {
 	if temporalClient.startOptions.WorkflowIDReusePolicy != enumspb.WORKFLOW_ID_REUSE_POLICY_REJECT_DUPLICATE {
 		t.Fatalf("reuse policy = %s, want REJECT_DUPLICATE", temporalClient.startOptions.WorkflowIDReusePolicy)
 	}
-	if temporalClient.startWorkflow == nil || len(temporalClient.startArgs) != 1 {
-		t.Fatalf("workflow start = %#v args=%#v, want BillWorkflow with one BillInput", temporalClient.startWorkflow, temporalClient.startArgs)
+	if temporalClient.startWorkflow != BillWorkflowName || len(temporalClient.startArgs) != 1 {
+		t.Fatalf("workflow start = %#v args=%#v, want %q with one BillInput", temporalClient.startWorkflow, temporalClient.startArgs, BillWorkflowName)
+	}
+	if gotInput, ok := temporalClient.startArgs[0].(BillInput); !ok || gotInput != (BillInput{
+		ClientID: reqBody.ClientID,
+		Currency: reqBody.Currency,
+		Period:   reqBody.Period,
+	}) {
+		t.Fatalf("workflow input = %#v, want shared BillInput for request", temporalClient.startArgs[0])
 	}
 	assertActivityBillRow(t, ctx, expectedBillID, reqBody.ClientID, reqBody.Currency, reqBody.Period, "OPEN", 1)
 }

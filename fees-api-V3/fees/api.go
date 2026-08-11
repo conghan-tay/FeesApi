@@ -176,7 +176,7 @@ func (s *Service) OpenBill(ctx context.Context, req *OpenBillRequest) (*OpenBill
 		TaskQueue:                s.temporalConfig.TaskQueue,
 		WorkflowIDConflictPolicy: enumspb.WORKFLOW_ID_CONFLICT_POLICY_FAIL,
 		WorkflowIDReusePolicy:    enumspb.WORKFLOW_ID_REUSE_POLICY_REJECT_DUPLICATE,
-	}, BillWorkflow, billInput)
+	}, BillWorkflowName, billInput)
 	if err != nil {
 		return nil, openTemporalError(err)
 	}

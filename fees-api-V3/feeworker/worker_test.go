@@ -1,4 +1,4 @@
-package fees
+package feeworker
 
 import (
 	"reflect"
@@ -57,8 +57,8 @@ func TestRegisterActivities(t *testing.T) {
 	if registrar.activities[0] != activities {
 		t.Fatal("registered activity value is not the Activities instance passed to registerActivities")
 	}
-	if got := reflect.TypeOf(registrar.activities[0]).String(); got != "*fees.Activities" {
-		t.Fatalf("registered activity type = %q, want *fees.Activities", got)
+	if got := reflect.TypeOf(registrar.activities[0]).String(); got != "*feeworker.Activities" {
+		t.Fatalf("registered activity type = %q, want *feeworker.Activities", got)
 	}
 	activityType := reflect.TypeOf(registrar.activities[0])
 	if _, ok := activityType.MethodByName("ActivityPersistBill"); ok {

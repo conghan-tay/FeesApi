@@ -1,4 +1,4 @@
-package fees
+package feeworker
 
 import (
 	"context"
@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"encore.app/charge"
+	"encore.app/fees"
 	"encore.dev/beta/errs"
 	"go.temporal.io/sdk/temporal"
 )
@@ -35,13 +36,13 @@ func (encoreLineItemStatusPublisher) PublishLineItemStatus(ctx context.Context, 
 type longRunningOperation func(context.Context, LedgerRow) error
 
 type billSealClient interface {
-	SealBill(context.Context, *SealBillRequest) (*CloseBillResponse, error)
+	SealBill(context.Context, *fees.SealBillRequest) (*fees.CloseBillResponse, error)
 }
 
 type encoreBillSealClient struct{}
 
-func (encoreBillSealClient) SealBill(ctx context.Context, req *SealBillRequest) (*CloseBillResponse, error) {
-	return SealBill(ctx, req)
+func (encoreBillSealClient) SealBill(ctx context.Context, req *fees.SealBillRequest) (*fees.CloseBillResponse, error) {
+	return fees.SealBill(ctx, req)
 }
 
 type Activities struct {
@@ -135,7 +136,7 @@ func (a *Activities) ActivityAutoCloseBill(ctx context.Context, billID string) e
 		return errors.New("auto-close bill: seal client is not configured")
 	}
 
-	resp, err := a.billSealClient.SealBill(ctx, &SealBillRequest{BillID: billID})
+	resp, err := a.billSealClient.SealBill(ctx, &fees.SealBillRequest{BillID: billID})
 	if err != nil {
 		wrapped := fmt.Errorf("auto-close bill %s: %w", billID, err)
 		if errs.Code(err) == errs.NotFound {

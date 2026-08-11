@@ -1,22 +1,18 @@
-package fees
+package feeworker
 
 import (
-	"fmt"
 	"time"
 
 	"encore.app/internal/chargecontract"
+	"encore.app/internal/feesworkflowcontract"
 )
 
 func billID(clientID, currency, period string) string {
-	return fmt.Sprintf("bill-%s-%s-%s", clientID, currency, period)
+	return feesworkflowcontract.BillID(clientID, currency, period)
 }
 
 func resolvePeriodEnd(period string) time.Time {
-	start, err := time.ParseInLocation("2006-01", period, time.UTC)
-	if err != nil {
-		panic(fmt.Errorf("invalid period identifier %q: %w", period, err))
-	}
-	return start.AddDate(0, 1, 0)
+	return feesworkflowcontract.ResolvePeriodEnd(period)
 }
 
 func newBillState(in BillInput) *BillState {
