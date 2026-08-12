@@ -64,6 +64,12 @@ Run the Encore test suite:
 ```bash
 encore test -v ./...
 ```
+To capture a simple count of tests run, passed, failed, and skipped:
+
+```bash
+encore test -v ./... 2>&1 | tee /tmp/pavebank-test.log
+awk '/^--- PASS:/{pass++} /^--- FAIL:/{fail++} /^--- SKIP:/{skip++} END{printf "run=%d pass=%d fail=%d skip=%d\n", pass+fail+skip, pass, fail, skip}' /tmp/pavebank-test.log
+```
 
 Check Temporal workflow determinism:
 
@@ -74,6 +80,7 @@ workflowcheck ./...
 
 With Temporal and Encore already running, execute the full lifecycle test:
 
+Local
 ```bash
 PAVEBANK_E2E=1 go test -v ./e2e -run TestFeesLifecycleE2E -count=1
 ```
@@ -94,7 +101,7 @@ PAVEBANK_E2E=1 go test -v ./e2e -run TestFeesLifecycleE2E -count=1
 ```bash
 temporal config set --profile fees-api-v3-cloud --prop address --value 'fees-api-v3-dev.ebtwx.tmprl.cloud:7233'
 temporal config set --profile fees-api-v3-cloud --prop namespace --value 'fees-api-v3-dev.ebtwx'
-temporal config set --profile fees-api-v3-cloud --prop api-key --value '<api-key>'
+temporal config set --profile fees-api-v3-cloud --prop api_key --value '<api-key>'
 temporal workflow list --profile fees-api-v3-cloud --limit 1 --output json
 ```
 
@@ -182,5 +189,3 @@ temporal config delete-profile --profile fees-api-v3-cloud
 4. Delete the new Encore app/environment and its provisioned infrastructure in
    Encore Cloud.
 
-The `encore.app` manifest intentionally remains linked to the deleted learning
-app after teardown.
