@@ -7,7 +7,7 @@ if #Meta.Environment.Cloud == "local" {
 }
 
 if #Meta.Environment.Cloud != "local" {
-	Target:        "TEMPORAL_CLOUD_ENDPOINT"
-	Namespace:     "TEMPORAL_CLOUD_NAMESPACE"
+	Target:        "fees-api-v3-dev.ebtwx.tmprl.cloud:7233"
+	Namespace:     "fees-api-v3-dev.ebtwx"
 	UseAPIKeyAuth: true
 }

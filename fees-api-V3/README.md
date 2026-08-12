@@ -84,15 +84,16 @@ PAVEBANK_E2E=1 go test -v ./e2e -run TestFeesLifecycleE2E -count=1
    `fees-api-v3-dev`. Use AWS Singapore when available, one-day retention, and
    API-key authentication.
 2. Copy the exact namespace identifier and Namespace Endpoint displayed by
-   Temporal Cloud. Do not construct either value manually.
+   Temporal Cloud. This deployment uses namespace `fees-api-v3-dev.ebtwx` and
+   endpoint `fees-api-v3-dev.ebtwx.tmprl.cloud:7233`.
 3. Create a short-lived API key that can access the namespace.
-4. Replace `TEMPORAL_CLOUD_ENDPOINT` and `TEMPORAL_CLOUD_NAMESPACE` in each
-   service's `temporal.cue` file with those exact values.
+4. Keep each service's `temporal.cue` file synchronized if the namespace is
+   recreated and Temporal Cloud assigns new values.
 5. Configure and verify a local Temporal CLI profile:
 
 ```bash
-temporal config set --profile fees-api-v3-cloud --prop address --value '<namespace-endpoint>'
-temporal config set --profile fees-api-v3-cloud --prop namespace --value '<namespace>'
+temporal config set --profile fees-api-v3-cloud --prop address --value 'fees-api-v3-dev.ebtwx.tmprl.cloud:7233'
+temporal config set --profile fees-api-v3-cloud --prop namespace --value 'fees-api-v3-dev.ebtwx'
 temporal config set --profile fees-api-v3-cloud --prop api-key --value '<api-key>'
 temporal workflow list --profile fees-api-v3-cloud --limit 1 --output json
 ```
