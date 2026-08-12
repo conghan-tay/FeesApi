@@ -1,4 +1,4 @@
-package fees
+package feeworker
 
 import (
 	"errors"
@@ -103,8 +103,8 @@ func TestBillStatusStringAndAcceptsAccruals(t *testing.T) {
 			if got := tt.status.String(); got != tt.want {
 				t.Fatalf("String() = %q, want %q", got, tt.want)
 			}
-			if got := tt.status.acceptsAccruals(); got != tt.accepts {
-				t.Fatalf("acceptsAccruals() = %v, want %v", got, tt.accepts)
+			if got := tt.status.AcceptsAccruals(); got != tt.accepts {
+				t.Fatalf("AcceptsAccruals() = %v, want %v", got, tt.accepts)
 			}
 		})
 	}

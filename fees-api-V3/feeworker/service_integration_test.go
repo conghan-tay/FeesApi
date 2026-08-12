@@ -1,4 +1,4 @@
-package fees
+package feeworker
 
 import (
 	"context"

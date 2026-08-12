@@ -1,6 +1,7 @@
-package fees
+package feeworker
 
 import (
+	"encore.app/internal/feesworkflowcontract"
 	"go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/workflow"
 )
@@ -12,7 +13,7 @@ type workerRegistrar interface {
 
 func registerWorkflows(registrar workerRegistrar) {
 	registrar.RegisterWorkflowWithOptions(BillWorkflow, workflow.RegisterOptions{
-		Name: BillWorkflowName,
+		Name: feesworkflowcontract.BillWorkflowName,
 	})
 }
 

@@ -1,4 +1,16 @@
-package fees
+package feesworkflowcontract
+
+import (
+	"fmt"
+	"time"
+)
+
+const (
+	TaskQueue        = "feeworker"
+	BillWorkflowName = "BillWorkflow"
+	SignalCloseBill  = "closeBill"
+	QueryGetBill     = "getBill"
+)
 
 type BillStatus int
 
@@ -24,7 +36,7 @@ func (s BillStatus) String() string {
 	}
 }
 
-func (s BillStatus) acceptsAccruals() bool {
+func (s BillStatus) AcceptsAccruals() bool {
 	return s == OPEN
 }
 
@@ -47,18 +59,14 @@ type BillView struct {
 	Status   string
 }
 
-type BillState struct {
-	clientID string
-	currency string
-	period   string
-	status   BillStatus
+func BillID(clientID, currency, period string) string {
+	return fmt.Sprintf("bill-%s-%s-%s", clientID, currency, period)
 }
 
-type LedgerRow struct {
-	BillID      string
-	Reference   string
-	AmountMinor int64
-	Currency    string
-	FeeType     string
-	Description string
+func ResolvePeriodEnd(period string) time.Time {
+	start, err := time.ParseInLocation("2006-01", period, time.UTC)
+	if err != nil {
+		panic(fmt.Errorf("invalid period identifier %q: %w", period, err))
+	}
+	return start.AddDate(0, 1, 0)
 }

@@ -1,4 +1,4 @@
-package fees
+package feeworker
 
 import (
 	"time"
@@ -6,13 +6,6 @@ import (
 	"encore.app/internal/chargecontract"
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
-)
-
-const (
-	BillWorkflowName = "BillWorkflow"
-
-	SignalCloseBill = "closeBill"
-	QueryGetBill    = "getBill"
 )
 
 type lineItemSignalHandler struct {
@@ -113,7 +106,7 @@ func (h *lineItemSignalHandler) start(ctx workflow.Context, state *BillState, li
 		)
 		return
 	}
-	if !state.status.acceptsAccruals() {
+	if !state.status.AcceptsAccruals() {
 		log.Error(
 			"add line item signal rejected",
 			"billID", id,
