@@ -5,20 +5,31 @@ import (
 	"fmt"
 
 	"encore.app/internal/feesworkflowcontract"
+	"encore.app/internal/temporalconnection"
+	"encore.dev/config"
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/worker"
 )
 
-const (
-	defaultTemporalTarget    = "127.0.0.1:7233"
-	defaultTemporalNamespace = "default"
-	temporalTaskQueue        = feesworkflowcontract.TaskQueue
-)
+const temporalTaskQueue = feesworkflowcontract.TaskQueue
+
+type temporalServiceConfig struct {
+	Target        config.String
+	Namespace     config.String
+	UseAPIKeyAuth config.Bool
+}
+
+var temporalCfg = config.Load[*temporalServiceConfig]()
+
+var secrets struct {
+	TemporalAPIKey string
+}
 
 type temporalConfig struct {
-	Target    string
-	Namespace string
-	TaskQueue string
+	Target        string
+	Namespace     string
+	TaskQueue     string
+	UseAPIKeyAuth bool
 }
 
 type temporalClient interface {
@@ -60,9 +71,10 @@ var (
 
 func defaultTemporalConfig() temporalConfig {
 	return temporalConfig{
-		Target:    defaultTemporalTarget,
-		Namespace: defaultTemporalNamespace,
-		TaskQueue: temporalTaskQueue,
+		Target:        temporalCfg.Target(),
+		Namespace:     temporalCfg.Namespace(),
+		TaskQueue:     temporalTaskQueue,
+		UseAPIKeyAuth: temporalCfg.UseAPIKeyAuth(),
 	}
 }
 
@@ -94,10 +106,18 @@ func initService() (*Service, error) {
 }
 
 func productionTemporalRuntime(cfg temporalConfig) (*temporalRuntime, error) {
-	temporalClient, err := dialTemporal(context.Background(), client.Options{
-		HostPort:  cfg.Target,
-		Namespace: cfg.Namespace,
-	})
+	options, err := temporalconnection.ClientOptions(temporalconnection.Config{
+		Target:        cfg.Target,
+		Namespace:     cfg.Namespace,
+		UseAPIKeyAuth: cfg.UseAPIKeyAuth,
+	}, temporalAPIKey(cfg))
+	if err != nil {
+		return nil, fmt.Errorf("configure temporal client: %w", err)
+	}
+
+	dialCtx, cancel := context.WithTimeout(context.Background(), temporalconnection.DialTimeout)
+	defer cancel()
+	temporalClient, err := dialTemporal(dialCtx, options)
 	if err != nil {
 		return nil, fmt.Errorf("connect temporal at %s namespace %s: %w", cfg.Target, cfg.Namespace, err)
 	}
@@ -115,6 +135,13 @@ func productionTemporalRuntime(cfg temporalConfig) (*temporalRuntime, error) {
 		worker: temporalWorker,
 		config: cfg,
 	}, nil
+}
+
+func temporalAPIKey(cfg temporalConfig) string {
+	if !cfg.UseAPIKeyAuth {
+		return ""
+	}
+	return secrets.TemporalAPIKey
 }
 
 func (s *Service) Shutdown(force context.Context) {

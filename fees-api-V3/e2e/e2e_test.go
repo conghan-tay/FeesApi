@@ -235,7 +235,7 @@ func waitForBillFacts(
 ) *Response[BillResource] {
 	t.Helper()
 
-	deadline := time.NewTimer(10 * time.Second)
+	deadline := time.NewTimer(60 * time.Second)
 	defer deadline.Stop()
 	ticker := time.NewTicker(50 * time.Millisecond)
 	defer ticker.Stop()

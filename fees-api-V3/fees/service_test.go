@@ -22,6 +22,9 @@ func TestDefaultTemporalConfig(t *testing.T) {
 	if cfg.Namespace != "default" {
 		t.Fatalf("Namespace = %q, want default", cfg.Namespace)
 	}
+	if cfg.UseAPIKeyAuth {
+		t.Fatal("UseAPIKeyAuth = true, want false for tests")
+	}
 	if cfg.TaskQueue != "feeworker" {
 		t.Fatalf("TaskQueue = %q, want feeworker", cfg.TaskQueue)
 	}
@@ -40,8 +43,11 @@ func TestInitServiceCreatesClientWithoutWorkerAndShutdown(t *testing.T) {
 	if err != nil {
 		t.Fatalf("initService returned error: %v", err)
 	}
-	if gotOptions.HostPort != defaultTemporalTarget || gotOptions.Namespace != defaultTemporalNamespace {
+	if gotOptions.HostPort != "127.0.0.1:7233" || gotOptions.Namespace != "default" {
 		t.Fatalf("Temporal options = %#v, want default target and namespace", gotOptions)
+	}
+	if gotOptions.Credentials != nil {
+		t.Fatal("Temporal credentials configured for local test environment")
 	}
 	if svc.temporalConfig != defaultTemporalConfig() {
 		t.Fatalf("service config = %#v, want %#v", svc.temporalConfig, defaultTemporalConfig())
