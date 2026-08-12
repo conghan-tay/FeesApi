@@ -21,6 +21,9 @@ func TestDefaultTemporalConfig(t *testing.T) {
 	if cfg.Namespace != "default" {
 		t.Fatalf("Namespace = %q, want default", cfg.Namespace)
 	}
+	if cfg.UseAPIKeyAuth {
+		t.Fatal("UseAPIKeyAuth = true, want false for tests")
+	}
 	if cfg.TaskQueue != "feeworker" {
 		t.Fatalf("TaskQueue = %q, want feeworker", cfg.TaskQueue)
 	}
