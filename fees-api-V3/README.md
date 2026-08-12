@@ -118,8 +118,8 @@ encore app link '<new-app-id>' --force
 ```
 
 3. In Encore Cloud, link GitHub repository
-   `conghan-tay/Pave_FeesApi`, set **Root Directory** to `fees-api-V3`, and map
-   branch `deploy-01` to the primary development environment.
+   `conghan-tay/FeesApi`, set **Root Directory** to `fees-api-V3`, and map branch
+   `main` to the primary development environment.
 4. Store the Temporal key for Encore's development environment:
 
 ```bash
@@ -134,8 +134,8 @@ encore secret set --type local TemporalAPIKey
 # Enter: unused-local
 ```
 
-6. Commit and push branch `deploy-01`. The configured GitHub branch deployment
-   builds the app and provisions its database and Pub/Sub infrastructure.
+6. Merge changes into `main`. The configured GitHub branch deployment builds
+   the app and provisions its database and Pub/Sub infrastructure.
 
 Follow deployment logs in Encore Cloud or with:
 
@@ -188,4 +188,3 @@ temporal config delete-profile --profile fees-api-v3-cloud
 
 4. Delete the new Encore app/environment and its provisioned infrastructure in
    Encore Cloud.
-
