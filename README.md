@@ -4,5 +4,6 @@
 
 ## Architecture Diagram
 
-<img width="936" height="537" alt="Screenshot 2026-08-11 at 11 14 53 AM" src="https://github.com/user-attachments/assets/f73276db-a306-4b9d-9427-ac42593fc67d" />
+<img width="961" height="552" alt="Screenshot 2026-08-13 at 7 52 30 PM" src="https://github.com/user-attachments/assets/b87e91e5-ef01-4c8a-b752-b76ea0839e12" />
+
 
