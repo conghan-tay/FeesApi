@@ -1,6 +1,6 @@
 # Fees API
 
-**UPDATE** New implementation in fees-api-V2
+**UPDATE** New implementation in fees-api-V3
 
 ## Architecture Diagram
 
