@@ -146,7 +146,8 @@ func (h *lineItemSignalHandler) start(ctx workflow.Context, state *BillState, li
 		}
 
 		activityCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
-			StartToCloseTimeout: 30 * time.Second,
+			StartToCloseTimeout:    time.Minute,
+			ScheduleToCloseTimeout: time.Hour,
 			RetryPolicy: &temporal.RetryPolicy{
 				InitialInterval:    time.Second,
 				BackoffCoefficient: 2.0,
@@ -184,42 +185,9 @@ func (h *lineItemSignalHandler) start(ctx workflow.Context, state *BillState, li
 }
 
 func closeBill(ctx workflow.Context, state *BillState, lineItems *lineItemSignalHandler) error {
-	log := workflow.GetLogger(ctx)
-
-	for {
-		var lineItem chargecontract.LineItem
-		if lineItems.signals.ReceiveAsync(&lineItem) {
-			log.Error(
-				"add line item signal rejected",
-				"billID", billID(state.clientID, state.currency, state.period),
-				"reference", lineItem.Reference,
-				"reason", "bill-not-open",
-				"status", state.status.String(),
-			)
-			continue
-		}
-		if lineItems.inFlight == 0 {
-			break
-		}
-
-		selector := workflow.NewSelector(ctx)
-		selector.AddReceive(lineItems.signals, func(c workflow.ReceiveChannel, _ bool) {
-			var rejected chargecontract.LineItem
-			c.Receive(ctx, &rejected)
-			log.Error(
-				"add line item signal rejected",
-				"billID", billID(state.clientID, state.currency, state.period),
-				"reference", rejected.Reference,
-				"reason", "bill-not-open",
-				"status", state.status.String(),
-			)
-		})
-		selector.AddReceive(lineItems.done, func(c workflow.ReceiveChannel, _ bool) {
-			c.Receive(ctx, nil)
-		})
-		selector.Select(ctx)
+	for lineItems.inFlight > 0 {
+		lineItems.done.Receive(ctx, nil)
 	}
-
 	state.status = CLOSING
 	return nil
 }
